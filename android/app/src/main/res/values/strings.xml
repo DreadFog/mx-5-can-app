@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">MX-5 Dashboard</string>
+    <string name="adapter_not_found">USB host ready / CANable 1D50:606F not found</string>
+    <string name="connect_canable">CONNECT CANABLE</string>
+</resources>
