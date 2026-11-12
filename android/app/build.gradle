@@ -18,4 +18,15 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+
+    sourceSets.main.assets.srcDir layout.buildDirectory.dir('generated/diagnosticAssets')
+}
+
+tasks.register('copyDiagnosticCatalog', Copy) {
+    from rootProject.file('../default.json')
+    into layout.buildDirectory.dir('generated/diagnosticAssets')
+}
+
+tasks.named('preBuild').configure {
+    dependsOn tasks.named('copyDiagnosticCatalog')
 }

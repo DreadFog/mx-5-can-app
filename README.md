@@ -6,8 +6,9 @@ Native Android dashboard for a 2024 Mazda MX-5 ND. The Pixel 9 connects directly
 
 - Displays vehicle speed and engine RPM; gear remains unavailable until a numerical signal is verified.
 - Starts in CAN listen-only mode. Active mode alternates standard OBD-II RPM (`01 0C`) and speed (`01 0D`) requests at up to 10 requests per second total.
-- Provides separate Dashboard, Logs, and Configuration pages.
-- The configurable RPM shift threshold defaults to 6,000 RPM. Above the threshold, a fresh RPM reading displays a full-screen red **UP** alert.
+- Provides separate Dashboard, Logs, Configuration, and Debug pages.
+- Debug shows the latest decoded and raw OBD/UDS responses with CAN/SIM source and freshness. Each value has a read-once button and a Live checkbox targeting 10 Hz per selected value.
+- The configurable RPM shift threshold defaults to 6,000 RPM. Edge lighting fades in from yellow at 75% of the threshold, transitions through orange at 90%, and reaches bright red at or above the threshold. The dashboard remains visible.
 - The CANable disconnects and returns to listen-only when active reads are stopped or the session closes.
 
 ## Safety and Hardware
@@ -26,7 +27,15 @@ cd android
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The debug APK is unsigned and intended for local installation. See [can_handoff.md](can_handoff.md) for historical SocketCAN and OBD wiring notes. [default.json](default.json) is retained as a Mazda signal-set reference and is not loaded by the app.
+The debug APK is intended for local installation, not release distribution. See [can_handoff.md](can_handoff.md) for historical SocketCAN and OBD wiring notes. [default.json](default.json) supplies the Debug catalogue and PC simulator; inclusion does not establish support for every signal on the 2024 vehicle.
+
+## Debug Reads
+
+Open Debug after connecting a CANable session or the PC simulator. Stop Dashboard active reads first. Use the refresh icon to request a value once, or check Live to monitor it at a target of 10 Hz. The pause icon stops all Debug Live reads. Debug polling continues across pages, but selections are not saved across app restarts or reconnections.
+
+The panel includes standard RPM/speed and the 91 UDS catalogue signals. Values remain visible when stale; negative UDS responses, invalid values, and timeouts are shown instead of inventing measurements. Several catalogue signals target other model years and are not verified on this vehicle. Physical requests require confirmation while parked; no actuator/write services are sent.
+
+Debug requests are serialized, with one response awaited at a time. The target is 10 Hz per selected value, not a guarantee: slow ECUs or many selections reduce the achieved rate without queuing a backlog. A timeout or negative response stops that signal's Live polling; disconnects stop all Debug reads. Physical CAN returns to listen-only once the final pending request finishes and no Live selection remains. Debug Live and Dashboard polling are mutually exclusive; the Dashboard's existing 10 requests/s total cadence is unchanged.
 
 ## PC CAN Simulator
 

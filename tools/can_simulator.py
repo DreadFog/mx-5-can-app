@@ -118,9 +118,9 @@ def build_uds_frame(signal_id, value, signals, values):
             raw += 1 << signal.bit_length
         raw &= (1 << signal.bit_length) - 1
         for bit in range(signal.bit_length):
-            if (raw >> bit) & 1:
+            if (raw >> (signal.bit_length - 1 - bit)) & 1:
                 bit_index = signal.bit_index + bit
-                data[4 + bit_index // 8] |= 1 << (bit_index % 8)
+                data[4 + bit_index // 8] |= 1 << (7 - bit_index % 8)
     return selected.response_id, bytes(data)
 
 
@@ -308,6 +308,7 @@ class CanSimulatorApp:
             subprocess.run(["adb", "-s", serial, "forward", f"tcp:{ADB_FORWARD_PORT}", ADB_SOCKET],
                            check=True, capture_output=True, text=True)
             self.socket = socket.create_connection(("127.0.0.1", ADB_FORWARD_PORT), timeout=3)
+            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.socket.settimeout(None)
             self.forwarded_device = serial
             self.connect_button.configure(text="Disconnect")

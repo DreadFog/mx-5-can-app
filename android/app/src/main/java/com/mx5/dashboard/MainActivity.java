@@ -18,6 +18,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.view.DisplayCutout;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
@@ -35,6 +36,8 @@ import java.util.ArrayDeque;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Locale;
+import java.util.ArrayList;
+import java.util.List;
 import org.json.JSONException;
 
 public final class MainActivity extends Activity implements GsUsb.Listener {
@@ -48,6 +51,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     private static final int PAGE_DASHBOARD = 0;
     private static final int PAGE_LOGS = 1;
     private static final int PAGE_CONFIGURATION = 2;
+    private static final int PAGE_DEBUG = 3;
     private static final int BACKGROUND = Color.rgb(25, 33, 30);
     private static final int PANEL = Color.rgb(34, 45, 40);
     private static final int MUTED = Color.rgb(165, 181, 168);
@@ -69,17 +73,19 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     private TextView transmitText;
     private TextView lastFrameText;
     private TextView logText;
-    private TextView shiftAlertRpm;
     private Button connectButton;
     private Button readButton;
     private Button dashboardTab;
     private Button logsTab;
     private Button configurationTab;
+    private Button debugTab;
+    private DebugPanel debugPanel;
+    private final List<DiagnosticSignal> diagnosticSignals = new ArrayList<>();
     private EditText thresholdInput;
     private ScrollView logScroll;
     private FrameLayout appRoot;
     private FrameLayout pageContainer;
-    private FrameLayout shiftAlertOverlay;
+    private RpmEdgeView shiftAlertOverlay;
     private View dashboardPage;
     private View logsPage;
     private View configurationPage;
@@ -189,6 +195,11 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
         SharedPreferences preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE);
         rpmThreshold = preferences.getInt(KEY_RPM_THRESHOLD, DEFAULT_RPM_THRESHOLD);
+        try {
+            diagnosticSignals.addAll(DiagnosticCatalog.load(getAssets().open("default.json")));
+        } catch (IOException | JSONException error) {
+            android.util.Log.e("Mx5Debug", "Unable to load diagnostic catalogue", error);
+        }
         buildScreen();
         IntentFilter filter = new IntentFilter(USB_PERMISSION);
         filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
@@ -207,6 +218,13 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
 
                 @Override public void onTransmitConfirmation(int sequence, boolean accepted) {
                     runOnUiThread(() -> {
+                        if (debugPanel.acknowledge(sequence, accepted)) {
+                            if (accepted) {
+                                transmittedFrames++;
+                                transmitText.setText(String.format(Locale.US, "SIM TX requests  %d", transmittedFrames));
+                            }
+                            return;
+                        }
                         if (sequence != pendingSimulatorSequence) return;
                         pendingSimulatorSequence = -1;
                         if (accepted) {
@@ -332,6 +350,17 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         LinearLayout appLayout = new LinearLayout(this);
         appLayout.setOrientation(LinearLayout.VERTICAL);
         appRoot.addView(appLayout, new FrameLayout.LayoutParams(-1, -1));
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            appRoot.setOnApplyWindowInsetsListener((view, insets) -> {
+                DisplayCutout cutout = insets.getDisplayCutout();
+                appLayout.setPadding(
+                        cutout == null ? 0 : cutout.getSafeInsetLeft(),
+                        cutout == null ? 0 : cutout.getSafeInsetTop(),
+                        cutout == null ? 0 : cutout.getSafeInsetRight(),
+                        cutout == null ? 0 : cutout.getSafeInsetBottom());
+                return insets;
+            });
+        }
 
         LinearLayout navigation = new LinearLayout(this);
         navigation.setGravity(Gravity.CENTER_VERTICAL);
@@ -341,24 +370,55 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         dashboardTab = button("DRIVE", true);
         logsTab = button("LOGS", false);
         configurationTab = button("CONFIG", false);
+        debugTab = button("DEBUG", false);
         LinearLayout.LayoutParams tabParams = new LinearLayout.LayoutParams(0, dp(44), 1);
         tabParams.setMargins(dp(3), 0, dp(3), 0);
         navigation.addView(dashboardTab, new LinearLayout.LayoutParams(tabParams));
         navigation.addView(logsTab, new LinearLayout.LayoutParams(tabParams));
         navigation.addView(configurationTab, new LinearLayout.LayoutParams(tabParams));
+        navigation.addView(debugTab, new LinearLayout.LayoutParams(tabParams));
+        for (Button tab : new Button[]{dashboardTab, logsTab, configurationTab, debugTab}) {
+            tab.setTextSize(10);
+            tab.setMinWidth(0);
+            tab.setMinimumWidth(0);
+            tab.setPadding(dp(2), 0, dp(2), 0);
+        }
         dashboardTab.setOnClickListener(view -> showPage(PAGE_DASHBOARD));
         logsTab.setOnClickListener(view -> showPage(PAGE_LOGS));
         configurationTab.setOnClickListener(view -> showPage(PAGE_CONFIGURATION));
+        debugTab.setOnClickListener(view -> showPage(PAGE_DEBUG));
 
         pageContainer = new FrameLayout(this);
         appLayout.addView(pageContainer, new LinearLayout.LayoutParams(-1, 0, 1));
         dashboardPage = page;
         logsPage = buildLogsPage();
         configurationPage = buildConfigurationPage();
+        debugPanel = new DebugPanel(this, diagnosticSignals, new DebugPanel.Transport() {
+            @Override public boolean ready() {
+                return !active && (connected || (simulatorClientConnected && (worker == null || !worker.isAlive())));
+            }
+
+            @Override public boolean physical() { return connected; }
+
+            @Override public int send(DiagnosticSignal signal) throws Exception {
+                if (connected && session != null) {
+                    if (!session.readOnce(signal)) throw new IOException("CAN reader is busy");
+                    return -1;
+                }
+                return simulationBridge.sendFrame(signal.request(0));
+            }
+
+            @Override public void holdNormalMode(boolean enabled) {
+                if (session != null) session.requestDiagnosticMode(enabled);
+            }
+
+            @Override public void log(String message) { addLog(message); }
+        });
         shiftAlertOverlay = buildShiftAlertOverlay();
         appRoot.addView(shiftAlertOverlay, new FrameLayout.LayoutParams(-1, -1));
 
         setContentView(appRoot);
+        appRoot.requestApplyInsets();
         showPage(PAGE_DASHBOARD);
         updateShiftAlert();
     }
@@ -433,34 +493,22 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         return page;
     }
 
-    private FrameLayout buildShiftAlertOverlay() {
-        FrameLayout overlay = new FrameLayout(this);
-        overlay.setBackgroundColor(RED);
-        LinearLayout message = new LinearLayout(this);
-        message.setOrientation(LinearLayout.VERTICAL);
-        message.setGravity(Gravity.CENTER);
-        TextView up = text("UP", 96, Color.WHITE, true);
-        up.setGravity(Gravity.CENTER);
-        message.addView(up, new LinearLayout.LayoutParams(-1, 0, 1));
-        shiftAlertRpm = text("", 22, Color.WHITE, true);
-        shiftAlertRpm.setGravity(Gravity.CENTER);
-        shiftAlertRpm.setPadding(0, 0, 0, dp(36));
-        message.addView(shiftAlertRpm);
-        overlay.addView(message, new FrameLayout.LayoutParams(-1, -1));
-        overlay.setVisibility(View.GONE);
-        return overlay;
+    private RpmEdgeView buildShiftAlertOverlay() {
+        return new RpmEdgeView(this);
     }
 
     private void showPage(int page) {
         View selected;
         if (page == PAGE_LOGS) selected = logsPage;
         else if (page == PAGE_CONFIGURATION) selected = configurationPage;
+        else if (page == PAGE_DEBUG) selected = debugPanel;
         else selected = dashboardPage;
         pageContainer.removeAllViews();
         pageContainer.addView(selected, new FrameLayout.LayoutParams(-1, -1));
         setTabSelected(dashboardTab, page == PAGE_DASHBOARD);
         setTabSelected(logsTab, page == PAGE_LOGS);
         setTabSelected(configurationTab, page == PAGE_CONFIGURATION);
+        setTabSelected(debugTab, page == PAGE_DEBUG);
         if (page == PAGE_LOGS && logScroll != null) {
             logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
         }
@@ -493,10 +541,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     private void updateShiftAlert() {
         if (shiftAlertOverlay == null) return;
         boolean fresh = rpmUpdatedAt != 0 && SystemClock.elapsedRealtime() - rpmUpdatedAt <= 3000;
-        boolean show = fresh && latestRpm > rpmThreshold;
-        if (show) shiftAlertRpm.setText(String.format(Locale.US, "%.0f RPM", latestRpm));
-        shiftAlertOverlay.setVisibility(show ? View.VISIBLE : View.GONE);
-        if (show) shiftAlertOverlay.bringToFront();
+        shiftAlertOverlay.setProgress(RpmAlert.progress(latestRpm, rpmThreshold, fresh));
     }
 
     private LinearLayout panel(LinearLayout parent) {
@@ -591,6 +636,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     }
 
     private void startSession() {
+        if (debugPanel.busy()) return;
         if (worker != null && worker.isAlive()) return;
         if (device == null || !usbManager.hasPermission(device)) {
             addLog("USB permission is required before connecting");
@@ -603,6 +649,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
 
     @SuppressLint("SetTextI18n")
     private void stopSession() {
+        debugPanel.stop("CAN session stopped");
         uiHandler.removeCallbacks(simulatorPoll);
         if (session != null) session.stop();
         session = null;
@@ -623,6 +670,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     }
 
     private void toggleReads() {
+        if (debugPanel.busy()) return;
         if (!connected && simulatorClientConnected) {
             if (active) {
                 stopSimulatorReads("Simulator active reads stopped by user");
@@ -659,6 +707,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
                 readButton.setText(active ? "STOP ACTIVE READS" : "START ACTIVE READS");
                 setConnection(active ? "SIMULATOR ACTIVE" : "PC SIMULATOR CONNECTED", true);
             } else {
+                debugPanel.stop("Simulator disconnected");
                 if (active) stopSimulatorReads("Simulator link closed; active reads stopped");
                 readButton.setEnabled(false);
                 showAdapter();
@@ -698,6 +747,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         runOnUiThread(() -> {
             connected = isConnected;
             active = isActive;
+            if (!isConnected) debugPanel.stop("CAN disconnected");
             setConnection(state.toUpperCase(Locale.US), connected);
             readButton.setEnabled(connected);
             readButton.setText(active ? "STOP ACTIVE READS" : "START ACTIVE READS");
@@ -721,6 +771,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     }
 
     private void displayFrame(CanFrame frame, boolean simulated) {
+        debugPanel.accept(frame, simulated);
         receivedFrames++;
         receiveText.setText(String.format(Locale.US, simulated ? "SIM frames   %d" : "RX frames    %d", receivedFrames));
         lastFrameText.setText(String.format(Locale.US, "%s 0x%03X  [%d]  %s",
@@ -772,6 +823,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     }
 
     @Override protected void onDestroy() {
+        debugPanel.close();
         uiHandler.removeCallbacks(expireValues);
         uiHandler.removeCallbacks(simulatorPoll);
         if (session != null) session.stop();

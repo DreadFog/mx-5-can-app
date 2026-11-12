@@ -9,8 +9,8 @@ Native Android app for a 2024 Mazda MX-5 ND and CANable `gs_usb` adapter. It con
 - Starts no CAN data transmission until the user explicitly taps **Start active reads**.
 - Active mode alternates the standard OBD-II engine RPM (`01 0C`) and vehicle speed (`01 0D`) read requests at up to 10 requests per second total (nominally 5 Hz per PID). Both responses have been verified on this vehicle while stationary.
 - Shows speed, RPM with a bottom-up 0-8,000 bar, and an unavailable gear field. No numeric gear signal for model year 2024 has been verified.
-- Separates the Dashboard, Logs, and Configuration pages; CAN counters and the USB/CAN event log are kept on Logs.
-- Provides a persistent shift-up threshold (default 6,000 RPM, configurable from 1,000 to 8,000 RPM). A fresh RPM reading above it replaces the UI with a red **UP** screen; the alert clears when RPM drops below the threshold or the reading expires.
+- Separates the Dashboard, Logs, Configuration, and Debug pages; CAN counters and the USB/CAN event log are kept on Logs.
+- Provides a persistent shift-up threshold (default 6,000 RPM, configurable from 1,000 to 8,000 RPM). Transparent edge lighting gradually brightens from yellow at 75% of the threshold through orange at 90%, reaching bright red at or above the threshold. The dashboard stays visible and interactive. Transitions are smoothed over 100 ms; lighting fades with falling RPM and clears when the reading expires.
 - Provides USB/CAN diagnostics: adapter VID/PID, interface and endpoint addresses, firmware/hardware versions, CAN feature flags and clock, RX/TX counts, last raw frame, transmit confirmations, timestamps, and recent errors.
 - Stops on USB errors, missing transmit confirmation, or CAN bus-off. Measurements expire after three seconds.
 
@@ -19,6 +19,14 @@ Native Android app for a 2024 Mazda MX-5 ND and CANable `gs_usb` adapter. It con
 For car-free development, keep the phone connected to the computer over USB for ADB, open the app, and run `python3 tools/can_simulator.py` from the repository root. Select the authorized ADB transport and connect. The panel loads all UDS signals from the root `default.json`, creates synthetic CAN response frames, and forwards them over `adb forward` to the app's local socket. Simulated frames use the regular display decoder and are marked `SIM` in Logs. **Start active reads** on the app to send OBD queries back to the PC; the simulator answers from its RPM/speed controls. Slider updates do not block the panel while reads are active. No frame reaches the USB CAN adapter or vehicle bus. The panel displays an event log and writes persistent diagnostics to `~/.local/state/mx5-can-simulator.log`. Wireless debugging may remain enabled; select the USB transport in the PC panel when both appear.
 
 The host-side encoder tests run with `python3 -m unittest discover -s tools -v` and require Python 3 plus Tkinter, but no external Python packages.
+
+## Debug Values and Live Polling
+
+Debug lists standard OBD RPM/speed and all 91 UDS signals from the packaged `default.json` catalogue. Each row displays its request/response IDs, last value, raw response bytes, CAN/SIM source, and FRESH/STALE status. The refresh icon sends one diagnostic request; the Live checkbox polls that value with a 100 ms target interval. The pause icon stops all Debug reads. Live remains selected when switching pages, but never resumes automatically after a disconnect or app restart.
+
+Stop Dashboard active reads before using Debug. Debug and Dashboard polling are mutually exclusive. Debug targets 10 Hz per selected value; the existing Dashboard still alternates RPM/speed at 10 requests/s total. Debug serializes requests rather than building a backlog, so slower ECU/USB responses and many selected values reduce the achieved rate. Negative replies, invalid responses and timeouts stop the affected Live signal; disconnects stop all selections. Last values remain visible and become stale after three seconds.
+
+On the car, every read-once/Live activation requires confirmation while parked. Some catalogue definitions target different model years and have not been verified on the 2024 MX-5. Only standard OBD/UDS read requests (services 01/22) are sent, never ECU writes or actuator commands. Single-frame diagnostic replies are supported; ISO-TP multi-frame replies are not assembled and time out. The CANable returns to listen-only when no Debug Live selection or pending request remains. Vehicle-side Debug/Live behavior still needs physical validation; simulator RPM/speed Live has been measured at approximately 10 Hz per value on the Pixel.
 
 ## Wireless ADB and Screen Mirroring
 
@@ -106,13 +114,15 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ## Protocol Test
 
-The protocol test exercises the recorded 721.25 RPM response, a speed response, request encoding, echo filtering, and malformed-frame rejection:
+The protocol test exercises recorded RPM/speed responses, request encoding, echo filtering, malformed-frame rejection, shift-light limits, and UDS numeric/bit/signed/negative response decoding:
 
 ```bash
 mkdir -p /tmp/mx5-protocol-test
 javac -d /tmp/mx5-protocol-test \
   app/src/main/java/com/mx5/dashboard/CanFrame.java \
   app/src/main/java/com/mx5/dashboard/Obd.java \
+  app/src/main/java/com/mx5/dashboard/RpmAlert.java \
+  app/src/main/java/com/mx5/dashboard/DiagnosticSignal.java \
   tests/ProtocolTest.java
 java -cp /tmp/mx5-protocol-test ProtocolTest
 ```

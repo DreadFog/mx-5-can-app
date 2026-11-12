@@ -22,9 +22,9 @@ class CanSimulatorTest(unittest.TestCase):
     def test_brake_and_clutch_share_a_response_frame(self):
         can_id, brake = build_uds_frame("MX5_BPA_SW", 1, self.signals, dict(self.values))
         self.assertEqual(can_id, 0x7E8)
-        self.assertEqual(brake[:5], bytes((4, 0x62, 0xA2, 0x11, 0x40)))
+        self.assertEqual(brake[:5], bytes((4, 0x62, 0xA2, 0x11, 0x02)))
         _, clutch = build_uds_frame("MX5_CPP_SW", 1, self.signals, dict(self.values))
-        self.assertEqual(clutch[4], 0x80)
+        self.assertEqual(clutch[4], 0x01)
 
     def test_obd_rpm_and_speed_responses(self):
         can_id, rpm = build_obd_frame(0x0C, 720)
@@ -47,7 +47,11 @@ class CanSimulatorTest(unittest.TestCase):
         response = respond_to_request(0x7E0, bytes((3, 0x22, 0xA2, 0x11)),
                                       self.signals, values, {})
         self.assertEqual(response[0], 0x7E8)
-        self.assertEqual(response[1][:5], bytes((4, 0x62, 0xA2, 0x11, 0x40)))
+        self.assertEqual(response[1][:5], bytes((4, 0x62, 0xA2, 0x11, 0x02)))
+
+    def test_uds_numeric_field_uses_big_endian_bytes(self):
+        _, response = build_uds_frame("MX5_MAP", 1.234, self.signals, dict(self.values))
+        self.assertEqual(response[:6], bytes((5, 0x62, 0x03, 0x01, 0x04, 0xD2)))
 
     def test_slider_frame_is_queued_without_waiting_for_phone_ack(self):
         app = CanSimulatorApp.__new__(CanSimulatorApp)

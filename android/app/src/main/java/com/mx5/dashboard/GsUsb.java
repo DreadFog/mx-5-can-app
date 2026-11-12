@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class GsUsb implements Runnable {
     private static final long REQUEST_INTERVAL_MS = 100;
@@ -26,11 +27,13 @@ public final class GsUsb implements Runnable {
     private final Listener listener;
     private volatile boolean running = true;
     private volatile boolean requestedActive;
+    private volatile boolean requestedDiagnosticMode;
     private UsbDeviceConnection connection;
     private UsbInterface usbInterface;
     private UsbEndpoint input;
     private UsbEndpoint output;
     private boolean active;
+    private final AtomicReference<DiagnosticSignal> singleRead = new AtomicReference<>();
 
     public GsUsb(UsbManager manager, UsbDevice device, Listener listener) {
         this.manager = manager;
@@ -39,7 +42,12 @@ public final class GsUsb implements Runnable {
     }
 
     public void requestActive(boolean enabled) { requestedActive = enabled; }
+    public void requestDiagnosticMode(boolean enabled) { requestedDiagnosticMode = enabled; }
     public void stop() { requestedActive = false; running = false; }
+
+    public boolean readOnce(DiagnosticSignal signal) {
+        return running && !requestedActive && singleRead.compareAndSet(null, signal);
+    }
 
     private static byte[] words(int... values) {
         ByteBuffer buffer = ByteBuffer.allocate(values.length * 4).order(ByteOrder.LITTLE_ENDIAN);
@@ -65,7 +73,7 @@ public final class GsUsb implements Runnable {
         controlOut(2, 0, 0, words(1, sendEnabled ? 0 : 1));
         active = sendEnabled;
         listener.onLog(sendEnabled ? "CAN started in normal mode, 500 kbit/s" : "CAN started in listen-only mode, 500 kbit/s");
-        listener.onState("Connected", true, active);
+        listener.onState("Connected", true, requestedActive);
     }
 
     private void open() throws IOException {
@@ -125,22 +133,36 @@ public final class GsUsb implements Runnable {
             int echoId = 0;
             int pendingEcho = -1;
             int pid = Obd.RPM;
+            DiagnosticSignal reading = null;
+            long readDeadline = 0;
             while (running) {
-                if (requestedActive != active) {
-                    pendingEcho = -1;
-                    setMode(requestedActive);
+                boolean normalMode = requestedActive || requestedDiagnosticMode || singleRead.get() != null || reading != null || pendingEcho != -1;
+                if (normalMode != active) {
+                    setMode(normalMode);
                     nextSend = 0;
                 }
                 long now = SystemClock.elapsedRealtime();
+                if (reading != null && now >= readDeadline) {
+                    listener.onLog("Debug read timed out: " + reading.id);
+                    singleRead.compareAndSet(reading, null);
+                    reading = null;
+                }
                 if (active && pendingEcho != -1 && now >= echoDeadline) {
                     throw new IOException("No USB transmit confirmation; active reading stopped");
                 }
-                if (active && requestedActive && pendingEcho == -1 && now >= nextSend) {
-                    CanFrame frame = Obd.request(pid, echoId);
+                DiagnosticSignal queued = singleRead.get();
+                boolean debugRead = !requestedActive && queued != null && reading == null;
+                if (active && pendingEcho == -1 && now >= nextSend && (requestedActive || debugRead)) {
+                    CanFrame frame = debugRead ? queued.request(echoId) : Obd.request(pid, echoId);
                     byte[] encoded = frame.encode();
                     int count = connection.bulkTransfer(output, encoded, encoded.length, 1000);
                     if (count != encoded.length) throw new IOException("USB write failed (" + count + ")");
-                    listener.onLog(String.format(Locale.US, "TX 7DF  02 01 %02X 00 00 00 00 00", pid));
+                    listener.onLog(debugRead ? "TX Debug read " + queued.id
+                            : String.format(Locale.US, "TX 7DF  02 01 %02X 00 00 00 00 00", pid));
+                    if (debugRead) {
+                        reading = queued;
+                        readDeadline = now + 2000;
+                    }
                     pendingEcho = echoId;
                     echoDeadline = now + 2000;
                     echoId = (echoId + 1) % 10;
@@ -163,6 +185,11 @@ public final class GsUsb implements Runnable {
                         continue;
                     }
                     listener.onFrame(frame);
+                    if (reading != null && reading.matches(frame)
+                            && !(reading.negative(frame) && (frame.data[3] & 255) == 0x78)) {
+                        singleRead.compareAndSet(reading, null);
+                        reading = null;
+                    }
                     if ((frame.canId & 0x20000040) == 0x20000040) throw new IOException("CAN bus-off reported; active reading stopped");
                 } catch (IllegalArgumentException error) {
                     listener.onLog("Ignored malformed USB frame: " + error.getMessage());
