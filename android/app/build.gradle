@@ -24,9 +24,14 @@ android {
 
 tasks.register('copyDiagnosticCatalog', Copy) {
     from rootProject.file('../default.json')
+    from rootProject.file('../discovered_obd.json')
     into layout.buildDirectory.dir('generated/diagnosticAssets')
 }
 
 tasks.named('preBuild').configure {
     dependsOn tasks.named('copyDiagnosticCatalog')
+}
+
+dependencies {
+    debugImplementation 'androidx.car.app:app:1.4.0'
 }

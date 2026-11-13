@@ -16,6 +16,9 @@ public final class DiagnosticSignal {
     public final boolean signed;
     public final Double nullMin;
     public final Double nullMax;
+    private Double minimum;
+    private Double maximum;
+    private java.util.Map<Long, String> mapping = java.util.Collections.emptyMap();
 
     public DiagnosticSignal(String id, String name, String unit, int requestId, int responseId,
             int identifier, boolean obd, int bitIndex, int bitLength, double multiplier,
@@ -38,40 +41,79 @@ public final class DiagnosticSignal {
     }
 
     public CanFrame request(int echoId) {
-        if (obd) return Obd.request(identifier, echoId);
+        if (obd) {
+            if (identifier < 0 || identifier > 255) throw new IllegalArgumentException("Invalid OBD PID");
+            return new CanFrame(echoId, requestId, 0, 0,
+                    new byte[]{2, 1, (byte) identifier, 0, 0, 0, 0, 0});
+        }
         return new CanFrame(echoId, requestId, 0, 0,
                 new byte[]{3, 0x22, (byte) (identifier >>> 8), (byte) identifier, 0, 0, 0, 0});
     }
 
     public boolean matches(CanFrame frame) {
-        byte[] data = frame.data;
-        if (frame.echoId != CanFrame.RECEIVED || frame.canId != responseId || data.length < 4) return false;
-        int length = data[0] & 255;
-        if (length < 3 || length > 7 || length + 1 > data.length) return false;
-        if (negative(frame)) return true;
-        return obd ? (data[1] & 255) == 0x41 && (data[2] & 255) == identifier
-                : (data[1] & 255) == 0x62 && (((data[2] & 255) << 8) | (data[3] & 255)) == identifier;
+        return matches(DiagnosticReply.fromFrame(frame));
+    }
+
+    public boolean matches(DiagnosticReply reply) {
+        if (reply == null || reply.canId != responseId) return false;
+        byte[] data = reply.payload;
+        if (negative(reply)) return true;
+        return obd ? data.length >= 2 && (data[0] & 255) == 0x41 && (data[1] & 255) == identifier
+                : data.length >= 3 && (data[0] & 255) == 0x62 && (((data[1] & 255) << 8) | (data[2] & 255)) == identifier;
     }
 
     public boolean negative(CanFrame frame) {
-        byte[] data = frame.data;
-        return data.length >= 4 && data[0] == 3 && (data[1] & 255) == 0x7F
-                && (data[2] & 255) == (obd ? 1 : 0x22);
+        return negative(DiagnosticReply.fromFrame(frame));
+    }
+
+    public boolean negative(DiagnosticReply reply) {
+        return reply != null && reply.canId == responseId && reply.payload.length == 3
+                && (reply.payload[0] & 255) == 0x7F && (reply.payload[1] & 255) == (obd ? 1 : 0x22);
     }
 
     public Double decode(CanFrame frame) {
-        if (!matches(frame) || negative(frame)) return null;
-        if (obd) return Obd.decode(frame, identifier);
-        int payloadBits = ((frame.data[0] & 255) - 3) * 8;
-        if (bitIndex + bitLength > payloadBits) return null;
+        return decode(DiagnosticReply.fromFrame(frame));
+    }
+
+    public DiagnosticSignal withFormat(Double min, Double max, java.util.Map<Long, String> map) {
+        minimum = min;
+        maximum = max;
+        mapping = new java.util.HashMap<>(map);
+        return this;
+    }
+
+    private Long rawValue(DiagnosticReply reply) {
+        if (!matches(reply) || negative(reply) || bitLength < 1 || bitLength > 32 || bitIndex < 0) return null;
+        int header = obd ? 2 : 3;
+        if (bitIndex + bitLength > (reply.payload.length - header) * 8) return null;
         long raw = 0;
         for (int bit = 0; bit < bitLength; bit++) {
             int index = bitIndex + bit;
-            raw = (raw << 1) | ((frame.data[4 + index / 8] >>> (7 - index % 8)) & 1);
+            raw = (raw << 1) | ((reply.payload[header + index / 8] >>> (7 - index % 8)) & 1);
         }
         if (signed && (raw & (1L << (bitLength - 1))) != 0) raw -= 1L << bitLength;
+        return raw;
+    }
+
+    public Double decode(DiagnosticReply reply) {
+        Long raw = rawValue(reply);
+        if (raw == null || divisor == 0) return null;
         double value = raw * multiplier / divisor + offset;
         if ((nullMin != null && value <= nullMin) || (nullMax != null && value >= nullMax)) return null;
+        if (minimum != null) value = Math.max(minimum, value);
+        if (maximum != null) value = Math.min(maximum, value);
         return value;
+    }
+
+    public String describe(DiagnosticReply reply) {
+        Long raw = rawValue(reply);
+        Double value = decode(reply);
+        if (raw == null || value == null) return "Unavailable / invalid payload";
+        if (!mapping.isEmpty()) return mapping.getOrDefault(raw, "Unknown") + " (" + raw + ")";
+        if ("hex".equals(unit)) return String.format(java.util.Locale.US, "%0" + ((bitLength + 3) / 4) + "X", raw);
+        if ("offon".equals(unit)) return (raw == 0 ? "Off" : "On") + " (" + raw + ")";
+        if ("noyes".equals(unit)) return (raw == 0 ? "No" : "Yes") + " (" + raw + ")";
+        if ("yesno".equals(unit)) return (raw == 0 ? "Yes" : "No") + " (" + raw + ")";
+        return String.format(java.util.Locale.US, "%.3f %s", value, unit);
     }
 }

@@ -8,6 +8,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.ActivityNotFoundException;
+import android.net.Uri;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -18,14 +20,20 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.view.DisplayCutout;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
+import android.widget.CheckBox;
 import android.text.InputType;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -45,6 +53,8 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     private static final String PREFERENCES = "dashboard_preferences";
     private static final String KEY_RPM_THRESHOLD = "rpm_threshold";
     private static final String KEY_MODEL_YEAR = "model_year";
+    private static final String KEY_MANUAL_TRANSMISSION = "manual_transmission";
+    private static final String KEY_KEEP_SCREEN_AWAKE = "keep_screen_awake";
     private static final int DEFAULT_MODEL_YEAR = 2024;
     private static final int DEFAULT_RPM_THRESHOLD = 6000;
     private static final int MIN_RPM_THRESHOLD = 1000;
@@ -88,6 +98,14 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     private EditText modelYearInput;
     private TextView modelYearSummary;
     private int modelYear = DEFAULT_MODEL_YEAR;
+    private boolean manualTransmission = true;
+    private RadioButton manualChoice;
+    private boolean keepScreenAwake = true;
+    private boolean destroyed;
+    private PowerManager powerManager;
+    private PowerManager.WakeLock sessionWakeLock;
+    private long wakeLockRenewedAt;
+    private TextView batteryStatus;
     private ScrollView logScroll;
     private FrameLayout appRoot;
     private FrameLayout pageContainer;
@@ -125,6 +143,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
                 speedText.setText("--");
                 speedUpdatedAt = 0;
             }
+            updateSessionWakeLock();
             uiHandler.postDelayed(this, 250);
         }
     };
@@ -198,12 +217,19 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         hideStatusBar();
+        powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        sessionWakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "mx5:usb-can-session");
+        sessionWakeLock.setReferenceCounted(false);
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
         SharedPreferences preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE);
         rpmThreshold = preferences.getInt(KEY_RPM_THRESHOLD, DEFAULT_RPM_THRESHOLD);
         modelYear = preferences.getInt(KEY_MODEL_YEAR, DEFAULT_MODEL_YEAR);
+        manualTransmission = preferences.getBoolean(KEY_MANUAL_TRANSMISSION, true);
+        keepScreenAwake = preferences.getBoolean(KEY_KEEP_SCREEN_AWAKE, true);
+        applyScreenAwake();
+        DashboardTelemetry.configure(rpmThreshold, modelYear);
         try {
-            diagnosticSignals.addAll(DiagnosticCatalog.load(getAssets().open("default.json"), modelYear));
+            diagnosticSignals.addAll(loadDiagnosticCatalogue(modelYear, manualTransmission));
         } catch (IOException | JSONException error) {
             android.util.Log.e("Mx5Debug", "Unable to load diagnostic catalogue", error);
         }
@@ -221,6 +247,20 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
 
                 @Override public void onFrame(CanFrame frame) {
                     onSimulatedFrame(frame);
+                }
+
+                @Override public void onReply(DiagnosticReply reply) {
+                    runOnUiThread(() -> {
+                        if (connected) {
+                            addLog("Rejected SIM reply while physical CAN session is open");
+                            return;
+                        }
+                        debugPanel.acceptReply(reply, true);
+                        receivedFrames++;
+                        receiveText.setText(String.format(Locale.US, "SIM frames   %d", receivedFrames));
+                        lastFrameText.setText(String.format(Locale.US, "SIM reply 0x%03X %s", reply.canId, hex(reply.payload)));
+                        addLog(String.format(Locale.US, "SIM reply 0x%03X %s", reply.canId, hex(reply.payload)));
+                    });
                 }
 
                 @Override public void onTransmitConfirmation(int sequence, boolean accepted) {
@@ -509,12 +549,93 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         modelYearInput.setText(String.valueOf(modelYear));
         modelYearInput.setBackgroundTintList(android.content.res.ColorStateList.valueOf(LIME));
         vehicleSettings.addView(modelYearInput, new LinearLayout.LayoutParams(-1, dp(58)));
-        modelYearSummary = text(String.format(Locale.US, "%d / %d signals", modelYear, diagnosticSignals.size()), 12, MUTED, false);
+        vehicleSettings.addView(text("TRANSMISSION", 12, MUTED, true));
+        RadioGroup transmission = new RadioGroup(this);
+        transmission.setOrientation(LinearLayout.VERTICAL);
+        manualChoice = new RadioButton(this);
+        manualChoice.setId(View.generateViewId());
+        manualChoice.setText("Manual");
+        manualChoice.setTextColor(Color.WHITE);
+        RadioButton automaticChoice = new RadioButton(this);
+        automaticChoice.setId(View.generateViewId());
+        automaticChoice.setText("Automatic");
+        automaticChoice.setTextColor(Color.WHITE);
+        transmission.addView(manualChoice);
+        transmission.addView(automaticChoice);
+        transmission.check(manualTransmission ? manualChoice.getId() : automaticChoice.getId());
+        vehicleSettings.addView(transmission);
+        modelYearSummary = text(vehicleSummary(), 12, MUTED, false);
         vehicleSettings.addView(modelYearSummary);
-        Button saveYear = button("SAVE MODEL YEAR", true);
+        Button saveYear = button("SAVE VEHICLE CONFIGURATION", true);
         vehicleSettings.addView(saveYear, new LinearLayout.LayoutParams(-1, dp(48)));
         saveYear.setOnClickListener(view -> saveModelYear());
+        LinearLayout energy = panel(content);
+        energy.addView(text("ENERGY", 12, MUTED, true));
+        CheckBox screenAwake = new CheckBox(this);
+        screenAwake.setText("Keep screen awake");
+        screenAwake.setTextColor(Color.WHITE);
+        screenAwake.setChecked(keepScreenAwake);
+        energy.addView(screenAwake);
+        screenAwake.setOnCheckedChangeListener((button, enabled) -> {
+            keepScreenAwake = enabled;
+            getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit().putBoolean(KEY_KEEP_SCREEN_AWAKE, enabled).apply();
+            applyScreenAwake();
+        });
+        batteryStatus = text("", 12, MUTED, false);
+        energy.addView(batteryStatus);
+        Button batteryExemption = button("BATTERY EXEMPTION", false);
+        energy.addView(batteryExemption, new LinearLayout.LayoutParams(-1, dp(48)));
+        batteryExemption.setOnClickListener(view -> requestBatteryExemption());
+        refreshEnergyStatus();
         return page;
+    }
+
+    private void applyScreenAwake() {
+        if (keepScreenAwake) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    }
+
+    private void refreshEnergyStatus() {
+        if (batteryStatus != null && powerManager != null) {
+            batteryStatus.setText(powerManager.isIgnoringBatteryOptimizations(getPackageName())
+                    ? "Battery optimization: exempt" : "Battery optimization: enabled");
+        }
+    }
+
+    private void requestBatteryExemption() {
+        Intent intent = powerManager.isIgnoringBatteryOptimizations(getPackageName())
+                ? new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                : new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        Uri.parse("package:" + getPackageName()));
+        try {
+            startActivity(intent);
+        } catch (ActivityNotFoundException error) {
+            try {
+                startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+            } catch (ActivityNotFoundException unavailable) {
+                addLog("Battery optimization settings unavailable on this device");
+            }
+        }
+    }
+
+    private void updateSessionWakeLock() {
+        if (sessionWakeLock == null) return;
+        boolean required = !destroyed && (connected || simulatorClientConnected);
+        if (!required) {
+            if (sessionWakeLock.isHeld()) sessionWakeLock.release();
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (!sessionWakeLock.isHeld() || now - wakeLockRenewedAt >= 60000) {
+            sessionWakeLock.acquire(120000);
+            wakeLockRenewedAt = now;
+        }
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        applyScreenAwake();
+        refreshEnergyStatus();
     }
 
     private void saveModelYear() {
@@ -527,16 +648,20 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
             return;
         }
         try {
-            List<DiagnosticSignal> filtered = DiagnosticCatalog.load(getAssets().open("default.json"), selectedYear);
+            boolean selectedManual = manualChoice.isChecked();
+            List<DiagnosticSignal> filtered = loadDiagnosticCatalogue(selectedYear, selectedManual);
             debugPanel.close();
             modelYear = selectedYear;
+            manualTransmission = selectedManual;
+            DashboardTelemetry.configure(rpmThreshold, modelYear);
             diagnosticSignals.clear();
             diagnosticSignals.addAll(filtered);
             debugPanel = new DebugPanel(this, diagnosticSignals, debugTransport);
-            getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit().putInt(KEY_MODEL_YEAR, modelYear).apply();
+                getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit().putInt(KEY_MODEL_YEAR, modelYear)
+                    .putBoolean(KEY_MANUAL_TRANSMISSION, manualTransmission).apply();
             modelYearInput.setError(null);
             modelYearInput.clearFocus();
-            modelYearSummary.setText(String.format(Locale.US, "%d / %d signals", modelYear, diagnosticSignals.size()));
+            modelYearSummary.setText(vehicleSummary());
             addLog("Model year " + modelYear + ": " + diagnosticSignals.size() + " filtered diagnostic signals");
         } catch (IOException | JSONException error) {
             modelYearInput.setError("Unable to load the diagnostic catalogue");
@@ -546,6 +671,18 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
 
     private RpmEdgeView buildShiftAlertOverlay() {
         return new RpmEdgeView(this);
+    }
+
+    private String vehicleSummary() {
+        return String.format(Locale.US, "%d / %s / %d signals", modelYear,
+                manualTransmission ? "Manual" : "Automatic", diagnosticSignals.size());
+    }
+
+    private List<DiagnosticSignal> loadDiagnosticCatalogue(int year, boolean manual) throws IOException, JSONException {
+        try (java.io.InputStream mazda = getAssets().open("default.json");
+                java.io.InputStream standard = getAssets().open("discovered_obd.json")) {
+            return DiagnosticCatalog.load(mazda, year, manual, standard);
+        }
     }
 
     private void showPage(int page) {
@@ -579,6 +716,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
                 return;
             }
             rpmThreshold = threshold;
+            DashboardTelemetry.configure(rpmThreshold, modelYear);
             getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit()
                     .putInt(KEY_RPM_THRESHOLD, rpmThreshold).apply();
             thresholdInput.setError(null);
@@ -744,6 +882,8 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     }
 
     private void setConnection(String value, boolean ready) {
+        updateSessionWakeLock();
+        DashboardTelemetry.setState(value);
         connectionText.setText(value);
         connectionText.setTextColor(ready ? LIME : MUTED);
     }
@@ -811,6 +951,13 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         runOnUiThread(() -> displayFrame(frame, false));
     }
 
+    @Override public void onReply(DiagnosticReply reply) {
+        runOnUiThread(() -> {
+            debugPanel.acceptReply(reply, false);
+            addLog(String.format(Locale.US, "RX ISO-TP 0x%03X  %s", reply.canId, hex(reply.payload)));
+        });
+    }
+
     private void onSimulatedFrame(CanFrame frame) {
         runOnUiThread(() -> {
             if (connected) {
@@ -822,6 +969,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     }
 
     private void displayFrame(CanFrame frame, boolean simulated) {
+        DashboardTelemetry.accept(frame, SystemClock.elapsedRealtime(), simulated);
         debugPanel.accept(frame, simulated);
         receivedFrames++;
         receiveText.setText(String.format(Locale.US, simulated ? "SIM frames   %d" : "RX frames    %d", receivedFrames));
@@ -874,6 +1022,9 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     }
 
     @Override protected void onDestroy() {
+        destroyed = true;
+        updateSessionWakeLock();
+        DashboardTelemetry.clear("Phone dashboard closed");
         debugPanel.close();
         uiHandler.removeCallbacks(expireValues);
         uiHandler.removeCallbacks(simulatorPoll);

@@ -7,7 +7,7 @@ import subprocess
 import threading
 import tkinter as tk
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from tkinter import ttk
@@ -15,6 +15,7 @@ from tkinter import ttk
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_JSON = ROOT / "default.json"
+DISCOVERED_JSON = ROOT / "discovered_obd.json"
 ADB_FORWARD_PORT = 39082
 ADB_SOCKET = "localabstract:mx5-can-sim"
 LOG_FILE = Path.home() / ".local/state/mx5-can-simulator.log"
@@ -37,10 +38,12 @@ class Signal:
     divisor: float
     offset: float
     signed: bool
+    service: int = 0x22
+    mapping: dict = field(default_factory=dict)
 
     @property
     def group(self):
-        return self.response_id, self.did
+        return self.service, self.response_id, self.did
 
     @property
     def initial(self):
@@ -54,8 +57,9 @@ def load_catalog(path=DEFAULT_JSON):
     signals = []
     for command in document.get("commands", []):
         request = command.get("cmd", {})
-        did_hex = request.get("22")
-        if not did_hex or len(did_hex) != 4:
+        service = 0x22 if "22" in request else 1
+        did_hex = request.get("22") if service == 0x22 else request.get("01")
+        if not did_hex or len(did_hex) != (4 if service == 0x22 else 2):
             continue
         response_id = int(command["rax"], 16)
         request_id = int(command["hdr"], 16)
@@ -63,7 +67,7 @@ def load_catalog(path=DEFAULT_JSON):
         for item in command.get("signals", []):
             fmt = item["fmt"]
             bits = int(fmt["len"])
-            if not 1 <= bits <= 16:
+            if not 1 <= bits <= 32:
                 continue
             multiplier = float(fmt.get("mul", 1))
             divisor = float(fmt.get("div", 1))
@@ -93,24 +97,26 @@ def load_catalog(path=DEFAULT_JSON):
                 divisor=divisor,
                 offset=offset,
                 signed=signed,
+                service=service,
+                mapping={int(key): str(value.get("value", key)) for key, value in fmt.get("map", {}).items()},
             ))
     return signals
 
 
 def build_uds_frame(signal_id, value, signals, values):
+    return build_signal_frame(signal_id, value, signals, values)
+
+
+def build_signal_frame(signal_id, value, signals, values):
     lookup = {signal.id: signal for signal in signals}
     selected = lookup[signal_id]
     values[signal_id] = min(selected.maximum, max(selected.minimum, float(value)))
     group = [signal for signal in signals if signal.group == selected.group]
     payload_bytes = max((signal.bit_index + signal.bit_length + 7) // 8 for signal in group)
-    if not 1 <= payload_bytes <= 4:
-        raise ValueError("UDS response does not fit in a classic CAN single frame")
-
-    data = bytearray(8)
-    data[0] = 3 + payload_bytes
-    data[1] = 0x62
-    data[2] = selected.did >> 8
-    data[3] = selected.did & 0xFF
+    header = bytes((0x41, selected.did)) if selected.service == 1 else bytes((0x62, selected.did >> 8, selected.did & 0xFF))
+    if not 1 <= payload_bytes <= 256 - len(header):
+        raise ValueError("Diagnostic payload exceeds simulator limit")
+    payload = bytearray(header) + bytearray(payload_bytes)
     for signal in group:
         physical = values.get(signal.id, signal.initial)
         raw = round((physical - signal.offset) * signal.divisor / signal.multiplier)
@@ -120,8 +126,11 @@ def build_uds_frame(signal_id, value, signals, values):
         for bit in range(signal.bit_length):
             if (raw >> (signal.bit_length - 1 - bit)) & 1:
                 bit_index = signal.bit_index + bit
-                data[4 + bit_index // 8] |= 1 << (7 - bit_index % 8)
-    return selected.response_id, bytes(data)
+                payload[len(header) + bit_index // 8] |= 1 << (7 - bit_index % 8)
+    if len(payload) <= 7:
+        data = bytes((len(payload),)) + payload
+        return selected.response_id, bytes(data).ljust(8, b"\0")
+    return selected.response_id, bytes(payload)
 
 
 def build_obd_frame(pid, value):
@@ -136,16 +145,37 @@ def build_obd_frame(pid, value):
     return 0x7E8, bytes(data)
 
 
+def build_support_frame(base, supported_pids):
+    if base < 0 or base > 0xE0 or base % 0x20:
+        raise ValueError("Invalid OBD support block")
+    pids = {pid for pid in supported_pids if 1 <= pid <= 0xFF and pid % 0x20 != 0}
+    mask = 0
+    for pid in pids:
+        offset = pid - base
+        if 1 <= offset <= 31:
+            mask |= 1 << (32 - offset)
+    if base < 0xE0 and any(pid > base + 0x20 for pid in pids):
+        mask |= 1
+    return 0x7E8, bytes((6, 0x41, base)) + mask.to_bytes(4, "big") + bytes(1)
+
+
 def respond_to_request(can_id, data, signals, values, obd_values):
-    if can_id == 0x7DF and len(data) >= 3 and data[1] == 0x01:
+    if can_id in (0x7DF, 0x7E0) and len(data) >= 3 and data[0] == 2 and data[1] == 0x01:
         pid = data[2]
-        if pid in obd_values:
+        if pid <= 0xE0 and pid % 0x20 == 0:
+            supported = (set(obd_values) & {0x0C, 0x0D}) | {signal.did for signal in signals if signal.service == 1}
+            return build_support_frame(pid, supported)
+        if pid in obd_values and pid in (0x0C, 0x0D):
             return build_obd_frame(pid, obd_values[pid])
+        match = next((signal for signal in signals if signal.service == 1 and signal.did == pid
+                      and signal.request_id == 0x7E0), None)
+        if match:
+            return build_signal_frame(match.id, values.get(match.id, match.initial), signals, values)
         return None
     if len(data) >= 4 and data[1] == 0x22:
         did = (data[2] << 8) | data[3]
         match = next((signal for signal in signals
-                      if signal.request_id == can_id and signal.did == did), None)
+                      if signal.service == 0x22 and signal.request_id == can_id and signal.did == did), None)
         if match:
             return build_uds_frame(match.id, values.get(match.id, match.initial), signals, values)
     return None
@@ -170,7 +200,7 @@ class CanSimulatorApp:
         self.root.title("MX-5 CAN Simulator")
         self.root.geometry("1020x820")
         self.root.minsize(760, 600)
-        self.signals = load_catalog()
+        self.signals = load_catalog() + load_catalog(DISCOVERED_JSON)
         self.values = {signal.id: signal.initial for signal in self.signals}
         self.obd_values = {0x0C: 700, 0x0D: 0}
         self.state_lock = threading.RLock()
@@ -220,7 +250,7 @@ class CanSimulatorApp:
 
         category_row = ttk.Frame(outer)
         category_row.pack(fill="x", pady=(0, 8))
-        ttk.Label(category_row, text=f"Vehicle signals from default.json ({len(self.signals)})").pack(side="left")
+        ttk.Label(category_row, text=f"Vehicle signals / Mazda + discovered OBD ({len(self.signals)})").pack(side="left")
         categories = list(dict.fromkeys(signal.category for signal in self.signals))
         self.category.set("Engine" if "Engine" in categories else categories[0])
         category_picker = ttk.Combobox(category_row, textvariable=self.category, values=categories, state="readonly", width=24)
@@ -268,7 +298,15 @@ class CanSimulatorApp:
             row = ttk.Frame(self.signal_rows, padding=(4, 5))
             row.pack(fill="x")
             ttk.Label(row, text=signal.name, width=40).pack(side="left")
-            if signal.unit == "offon":
+            if signal.mapping:
+                options = {f"{key}: {label}": key for key, label in signal.mapping.items()}
+                choice = ttk.Combobox(row, state="readonly", values=list(options), width=26)
+                current = next((name for name, raw in options.items() if raw == self.values[signal.id]), "")
+                choice.set(current)
+                choice.pack(side="left", padx=8)
+                choice.bind("<<ComboboxSelected>>", lambda event, item=signal, widget=choice, available=options:
+                            self._signal_changed(item, available[widget.get()]))
+            elif signal.unit in ("offon", "noyes", "yesno") and signal.bit_length == 1:
                 state = tk.BooleanVar(value=bool(self.values[signal.id]))
                 ttk.Checkbutton(row, text="On", variable=state,
                                 command=lambda item=signal, var=state: self._signal_changed(item, int(var.get()))).pack(side="left")
@@ -366,10 +404,12 @@ class CanSimulatorApp:
         value = float(value)
         with self.state_lock:
             self.values[signal.id] = value
+            if signal.service == 1 and signal.did in (0x0C, 0x0D):
+                self.obd_values[signal.did] = int(value)
         if label:
             label.set(self._format_value(value, signal.unit))
         try:
-            can_id, data = build_uds_frame(signal.id, value, self.signals, self.values)
+            can_id, data = build_signal_frame(signal.id, value, self.signals, self.values)
             self._send_frame(can_id, data)
         except (KeyError, ValueError) as error:
             self.status.set(f"Frame encoding failed: {error}")
@@ -383,7 +423,7 @@ class CanSimulatorApp:
             self._log(f"Queued frame 0x{can_id:03X} {data.hex().upper()}")
             return
         try:
-            self._send_message({"type": "frame", "canId": can_id, "data": data.hex().upper()}, False)
+            self._send_message({"type": self._wire_type(data), "canId": can_id, "data": data.hex().upper()}, False)
             self.root.after(0, self._count_sent_frame)
             self.root.after(0, self._log, f"Sent response frame 0x{can_id:03X} {data.hex().upper()}")
         except (OSError, ValueError, TimeoutError) as error:
@@ -396,7 +436,7 @@ class CanSimulatorApp:
                 return
             sock, can_id, data = task
             try:
-                self._send_message({"type": "frame", "canId": can_id, "data": data.hex().upper()}, True, sock)
+                self._send_message({"type": self._wire_type(data), "canId": can_id, "data": data.hex().upper()}, True, sock)
                 self.root.after(0, self._count_sent_frame)
                 self.root.after(0, self._log, f"Phone ACKed frame 0x{can_id:03X} {data.hex().upper()}")
             except (OSError, ValueError, TimeoutError) as error:
@@ -425,6 +465,10 @@ class CanSimulatorApp:
         if not acknowledgement or not acknowledgement.get("ok"):
             raise ValueError("Phone rejected the simulated frame")
         return sequence
+
+    @staticmethod
+    def _wire_type(data):
+        return "reply" if data and data[0] in (0x41, 0x62, 0x7F) else "frame"
 
     def _send_ack(self, sequence, accepted):
         if not self.socket:

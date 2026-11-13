@@ -35,6 +35,7 @@ public final class DebugPanel extends ScrollView {
     private final HashMap<String, CheckBox> liveButtons = new HashMap<>();
     private final HashMap<String, String> values = new HashMap<>();
     private final HashMap<String, Long> receivedAt = new HashMap<>();
+    private final HashMap<String, DiagnosticSignal> byId = new HashMap<>();
     private final LinkedHashMap<DiagnosticSignal, Long> live = new LinkedHashMap<>();
     private final Handler handler = new Handler(Looper.getMainLooper());
     private DiagnosticSignal pending;
@@ -43,6 +44,19 @@ public final class DebugPanel extends ScrollView {
     private long refreshedAt;
     private int cursor;
     private boolean closed;
+    private ImageButton discoveryButton;
+    private TextView discoveryView;
+    private ObdPidDiscovery discovery;
+    private boolean discovering;
+    private String discoverySource;
+    private final Runnable nextDiscovery = this::advanceDiscovery;
+
+    private void advanceDiscovery() {
+        if (!closed && discovering) {
+            if (transport.ready()) read(discovery.request());
+            else finishDiscovery("Transport unavailable");
+        }
+    }
     private final Runnable tick = new Runnable() {
         @Override public void run() {
             if (closed) return;
@@ -77,6 +91,7 @@ public final class DebugPanel extends ScrollView {
     public DebugPanel(Context context, List<DiagnosticSignal> signals, Transport transport) {
         super(context);
         this.signals = signals;
+        for (DiagnosticSignal signal : signals) byId.put(signal.id, signal);
         this.transport = transport;
         setFillViewport(true);
         LinearLayout rows = new LinearLayout(context);
@@ -91,9 +106,24 @@ public final class DebugPanel extends ScrollView {
         stopLive.setColorFilter(0xFFCAE297);
         stopLive.setBackgroundColor(0xFF222D28);
         stopLive.setContentDescription("Stop all Live reads");
-        stopLive.setTooltipText("Stop all Live reads");
+        stopLive.setTooltipText("Stop Live reads / PID discovery");
         rows.addView(stopLive, new LinearLayout.LayoutParams(dp(48), dp(48)));
         stopLive.setOnClickListener(view -> stop("Debug reads stopped by user"));
+        LinearLayout discoveryRow = new LinearLayout(context);
+        discoveryRow.setGravity(Gravity.CENTER_VERTICAL);
+        discoveryRow.setPadding(0, dp(12), 0, dp(12));
+        rows.addView(discoveryRow);
+        discoveryView = text("Supported OBD PIDs / engine 7E0 → 7E8\nNot scanned", 12, 0xFFCAE297);
+        discoveryView.setTextIsSelectable(true);
+        discoveryRow.addView(discoveryView, new LinearLayout.LayoutParams(0, -2, 1));
+        discoveryButton = new ImageButton(context);
+        discoveryButton.setImageResource(android.R.drawable.ic_menu_search);
+        discoveryButton.setColorFilter(0xFFCAE297);
+        discoveryButton.setBackgroundColor(0xFF222D28);
+        discoveryButton.setContentDescription("Discover supported engine OBD PIDs");
+        discoveryButton.setTooltipText("Discover supported engine OBD PIDs");
+        discoveryRow.addView(discoveryButton, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        discoveryButton.setOnClickListener(view -> confirmDiscovery());
         for (DiagnosticSignal signal : signals) {
             LinearLayout row = new LinearLayout(context);
             row.setGravity(Gravity.CENTER_VERTICAL);
@@ -147,7 +177,7 @@ public final class DebugPanel extends ScrollView {
     }
 
     private void confirm(DiagnosticSignal signal, boolean continuous) {
-        if (!transport.ready() || (!continuous && pending != null)) return;
+        if (discovering || !transport.ready() || (!continuous && pending != null)) return;
         Runnable start = () -> {
             if (!transport.ready()) return;
             if (continuous) {
@@ -189,22 +219,44 @@ public final class DebugPanel extends ScrollView {
     }
 
     public void accept(CanFrame frame, boolean simulated) {
+        if (discovering && pending != null && pending.matches(frame)) {
+            if (pending.negative(frame)) {
+                if ((frame.data[3] & 255) != 0x78) {
+                    finishDiscovery(String.format(Locale.US, "ECU refused support block / NRC %02X", frame.data[3] & 255));
+                }
+            } else if (!discovery.accept(frame)) {
+                finishDiscovery("Invalid support-mask reply");
+            } else {
+                pending = null;
+                pendingSequence = -1;
+                showDiscoveryResult(discovery.isComplete() ? "Complete" : "Scanning");
+                if (discovery.isComplete()) finishDiscovery("Complete");
+                else handler.postDelayed(nextDiscovery, 250);
+            }
+            refresh();
+            return;
+        }
+        DiagnosticReply reply = DiagnosticReply.fromFrame(frame);
+        if (reply != null) acceptReply(reply, simulated);
+    }
+
+    public void acceptReply(DiagnosticReply reply, boolean simulated) {
+        if (closed || discovering) return;
         for (DiagnosticSignal signal : signals) {
-            if (!signal.matches(frame)) continue;
-            if (signal.negative(frame) && pending != signal) continue;
-            Double value = signal.decode(frame);
-            String decoded = signal.negative(frame)
-                    ? String.format(Locale.US, "Negative response / NRC %02X", frame.data[3] & 255)
-                    : value == null ? "Unavailable / invalid payload" : String.format(Locale.US, "%.3f %s", value, signal.unit);
+            if (!signal.matches(reply)) continue;
+            if (signal.negative(reply) && pending != signal) continue;
+            String decoded = signal.negative(reply)
+                    ? String.format(Locale.US, "Negative response / NRC %02X", reply.payload[2] & 255)
+                    : sensorSupported(signal, reply) ? signal.describe(reply) : "Not supported by ECU flag";
             StringBuilder raw = new StringBuilder();
-            for (byte item : frame.data) raw.append(String.format(Locale.US, "%02X ", item & 255));
+            for (byte item : reply.payload) raw.append(String.format(Locale.US, "%02X ", item & 255));
             values.put(signal.id, (simulated ? "SIM / " : "CAN / ") + decoded + "\n" + raw);
             receivedAt.put(signal.id, SystemClock.elapsedRealtime());
         }
-        if (pending != null && pending.matches(frame)) {
-            if (pending.negative(frame)) {
-                if ((frame.data[3] & 255) != 0x78) failPending(null);
-            } else if (pending.decode(frame) == null) {
+        if (pending != null && pending.matches(reply)) {
+            if (pending.negative(reply)) {
+                if ((reply.payload[2] & 255) != 0x78) failPending(null);
+            } else if (pending.decode(reply) == null || !sensorSupported(pending, reply)) {
                 failPending(null);
             } else {
                 pending = null;
@@ -218,6 +270,10 @@ public final class DebugPanel extends ScrollView {
 
     private void failPending(String reason) {
         if (pending == null) return;
+        if (discovering) {
+            finishDiscovery(reason == null ? "Discovery stopped" : reason);
+            return;
+        }
         if (reason != null) {
             values.put(pending.id, reason + (values.containsKey(pending.id) ? "\nLast: " + values.get(pending.id) : ""));
             transport.log("Debug " + pending.id + ": " + reason);
@@ -229,11 +285,19 @@ public final class DebugPanel extends ScrollView {
         transport.holdNormalMode(!live.isEmpty());
     }
 
+    private boolean sensorSupported(DiagnosticSignal signal, DiagnosticReply reply) {
+        DiagnosticSignal flag = byId.get(signal.id + "_SUP");
+        if (flag == null || !flag.matches(reply)) return true;
+        Double supported = flag.decode(reply);
+        return supported != null && supported != 0;
+    }
+
     public boolean busy() {
-        return pending != null || !live.isEmpty();
+        return discovering || pending != null || !live.isEmpty();
     }
 
     public void stop(String reason) {
+        if (discovering) finishDiscovery(reason);
         failPending(reason);
         live.clear();
         for (CheckBox button : liveButtons.values()) button.setChecked(false);
@@ -245,19 +309,71 @@ public final class DebugPanel extends ScrollView {
         closed = true;
         stop("Debug closed");
         handler.removeCallbacks(tick);
+        handler.removeCallbacks(nextDiscovery);
+    }
+
+    private void confirmDiscovery() {
+        if (busy() || !transport.ready()) return;
+        Runnable start = () -> {
+            if (busy() || !transport.ready() || closed) return;
+            discovery = new ObdPidDiscovery();
+            discovering = true;
+            discoverySource = transport.physical() ? "CAN" : "SIM";
+            transport.holdNormalMode(true);
+            showDiscoveryResult("Scanning");
+            read(discovery.request());
+            refresh();
+        };
+        if (!transport.physical()) {
+            start.run();
+            return;
+        }
+        new AlertDialog.Builder(getContext()).setTitle("Discover engine OBD PIDs?")
+                .setMessage("Only while parked. Queries up to eight standard support masks from ECU 7E0. "
+                        + "No Mazda DID scan or ECU writes. Returns to passive listening afterwards.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Discover", (dialog, which) -> start.run()).show();
+    }
+
+    private void showDiscoveryResult(String status) {
+        if (discovery == null) return;
+        StringBuilder list = new StringBuilder();
+        for (int pid : discovery.getSupportedPids()) {
+            if (list.length() != 0) list.append(", ");
+            list.append(String.format(Locale.US, "%02X", pid));
+        }
+        discoveryView.setText(String.format(Locale.US, "%s / engine 7E0 → 7E8\n%s / %d blocks\nPID: %s",
+                discoverySource, status, discovery.getBlocksRead(), list.length() == 0 ? "none reported" : list));
+    }
+
+    private void finishDiscovery(String reason) {
+        boolean complete = discovery != null && discovery.isComplete();
+        showDiscoveryResult(complete ? "Complete" : "Partial / " + reason);
+        discovering = false;
+        pending = null;
+        pendingSequence = -1;
+        handler.removeCallbacks(nextDiscovery);
+        transport.holdNormalMode(false);
+        transport.log("Engine OBD PID discovery: " + reason);
+        refresh();
     }
 
     private void refresh() {
         boolean ready = transport.ready();
+        boolean discoveryEnabled = ready && !busy();
+        if (discoveryButton.isEnabled() != discoveryEnabled) {
+            discoveryButton.setEnabled(discoveryEnabled);
+            discoveryButton.setAlpha(discoveryEnabled ? 1 : 0.35f);
+        }
         for (DiagnosticSignal signal : signals) {
-            boolean onceEnabled = ready && pending == null && live.isEmpty();
+            boolean onceEnabled = ready && !discovering && pending == null && live.isEmpty();
             ImageButton once = readButtons.get(signal.id);
             if (once.isEnabled() != onceEnabled) {
                 once.setEnabled(onceEnabled);
                 once.setAlpha(onceEnabled ? 1 : 0.35f);
             }
             CheckBox liveButton = liveButtons.get(signal.id);
-            boolean liveEnabled = ready || live.containsKey(signal);
+            boolean liveEnabled = (!discovering && ready) || live.containsKey(signal);
             if (liveButton.isEnabled() != liveEnabled) liveButton.setEnabled(liveEnabled);
             String value = values.get(signal.id);
             if (value != null) {

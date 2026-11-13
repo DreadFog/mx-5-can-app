@@ -19,6 +19,7 @@ public final class GsUsb implements Runnable {
     public interface Listener {
         void onState(String state, boolean connected, boolean active);
         void onFrame(CanFrame frame);
+        void onReply(DiagnosticReply reply);
         void onLog(String message);
     }
 
@@ -134,6 +135,7 @@ public final class GsUsb implements Runnable {
             int pendingEcho = -1;
             int pid = Obd.RPM;
             DiagnosticSignal reading = null;
+            IsoTpReceiver isoTp = null;
             long readDeadline = 0;
             while (running) {
                 boolean normalMode = requestedActive || requestedDiagnosticMode || singleRead.get() != null || reading != null || pendingEcho != -1;
@@ -146,6 +148,7 @@ public final class GsUsb implements Runnable {
                     listener.onLog("Debug read timed out: " + reading.id);
                     singleRead.compareAndSet(reading, null);
                     reading = null;
+                    isoTp = null;
                 }
                 if (active && pendingEcho != -1 && now >= echoDeadline) {
                     throw new IOException("No USB transmit confirmation; active reading stopped");
@@ -161,6 +164,7 @@ public final class GsUsb implements Runnable {
                             : String.format(Locale.US, "TX 7DF  02 01 %02X 00 00 00 00 00", pid));
                     if (debugRead) {
                         reading = queued;
+                        isoTp = new IsoTpReceiver(queued);
                         readDeadline = now + 2000;
                     }
                     pendingEcho = echoId;
@@ -168,6 +172,15 @@ public final class GsUsb implements Runnable {
                     echoId = (echoId + 1) % 10;
                     pid = pid == Obd.RPM ? Obd.SPEED : Obd.RPM;
                     nextSend = now + REQUEST_INTERVAL_MS;
+                }
+                if (active && pendingEcho == -1 && isoTp != null && isoTp.needsFlowControl()) {
+                    byte[] encoded = isoTp.flowControl(echoId).encode();
+                    int written = connection.bulkTransfer(output, encoded, encoded.length, 1000);
+                    if (written != encoded.length) throw new IOException("ISO-TP flow-control write failed");
+                    pendingEcho = echoId;
+                    echoDeadline = now + 2000;
+                    echoId = (echoId + 1) % 10;
+                    listener.onLog("TX ISO-TP flow control for " + reading.id);
                 }
                 int count = connection.bulkTransfer(input, buffer, buffer.length, 100);
                 if (count < 0) {
@@ -185,10 +198,21 @@ public final class GsUsb implements Runnable {
                         continue;
                     }
                     listener.onFrame(frame);
+                    if (reading != null && isoTp != null && frame.data.length > 0
+                            && ((frame.data[0] & 255) >>> 4) != 0) {
+                        DiagnosticReply reply = isoTp.accept(frame);
+                        if (reply != null) {
+                            listener.onReply(reply);
+                            singleRead.compareAndSet(reading, null);
+                            reading = null;
+                            isoTp = null;
+                        }
+                    }
                     if (reading != null && reading.matches(frame)
                             && !(reading.negative(frame) && (frame.data[3] & 255) == 0x78)) {
                         singleRead.compareAndSet(reading, null);
                         reading = null;
+                        isoTp = null;
                     }
                     if ((frame.canId & 0x20000040) == 0x20000040) throw new IOException("CAN bus-off reported; active reading stopped");
                 } catch (IllegalArgumentException error) {

@@ -19,6 +19,7 @@ public final class SimulationBridge implements AutoCloseable {
     public interface Listener {
         void onConnectionChanged(boolean connected);
         void onFrame(CanFrame frame);
+        void onReply(DiagnosticReply reply);
         void onTransmitConfirmation(int sequence, boolean accepted);
         void onError(String message);
     }
@@ -90,17 +91,19 @@ public final class SimulationBridge implements AutoCloseable {
                     }
                     continue;
                 }
-                if (!"frame".equals(type)) throw new IllegalArgumentException("Unknown simulator message type");
+                boolean reply = "reply".equals(type);
+                if (!"frame".equals(type) && !reply) throw new IllegalArgumentException("Unknown simulator message type");
                 int canId = message.getInt("canId");
                 String hexData = message.getString("data");
-                if (canId < 0 || canId > 0x7FF || hexData.length() > 16 || (hexData.length() & 1) != 0) {
+                if (canId < 0 || canId > 0x7FF || hexData.length() > (reply ? 512 : 16) || (hexData.length() & 1) != 0) {
                     throw new IllegalArgumentException("Invalid standard CAN frame");
                 }
                 byte[] data = new byte[hexData.length() / 2];
                 for (int index = 0; index < data.length; index++) {
                     data[index] = (byte) Integer.parseInt(hexData.substring(index * 2, index * 2 + 2), 16);
                 }
-                listener.onFrame(new CanFrame(CanFrame.RECEIVED, canId, 0, 0, data));
+                if (reply) listener.onReply(new DiagnosticReply(canId, data));
+                else listener.onFrame(new CanFrame(CanFrame.RECEIVED, canId, 0, 0, data));
                 writeAck(message.optInt("seq", -1), true);
             } catch (JSONException | IllegalArgumentException error) {
                 listener.onError("Ignored malformed simulator frame: " + error.getMessage());

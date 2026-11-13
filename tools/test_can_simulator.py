@@ -5,7 +5,7 @@ import socket
 import threading
 import time
 
-from can_simulator import CanSimulatorApp, build_obd_frame, build_uds_frame, load_catalog, respond_to_request
+from can_simulator import CanSimulatorApp, DISCOVERED_JSON, build_signal_frame, build_obd_frame, build_uds_frame, build_support_frame, load_catalog, respond_to_request
 
 
 class CanSimulatorTest(unittest.TestCase):
@@ -18,6 +18,38 @@ class CanSimulatorTest(unittest.TestCase):
     def test_loads_all_default_signals(self):
         self.assertEqual(len(self.signals), 91)
         self.assertIn("Engine", {signal.category for signal in self.signals})
+
+    def test_discovered_catalogue_covers_all_52_pids(self):
+        standard = load_catalog(DISCOVERED_JSON)
+        self.assertEqual(len(standard), 146)
+        self.assertEqual(len({signal.did for signal in standard}), 52)
+        _, voltage = build_signal_frame("VPWR", 13.87, standard, {})
+        self.assertEqual(voltage[:5], bytes.fromhex("044142362E"))
+
+    def test_discovered_long_reply_is_sent_as_diagnostic_payload(self):
+        standard = load_catalog(DISCOVERED_JSON)
+        _, reply = build_signal_frame("FRT_B", 50, standard, {})
+        self.assertEqual(len(reply), 13)
+        self.assertEqual(reply[:2], bytes.fromhex("416D"))
+        self.assertEqual(reply[-1], 90)
+        self.assertEqual(CanSimulatorApp._wire_type(reply), "reply")
+
+    def test_engine_support_discovery_reports_simulated_pids_only(self):
+        response = respond_to_request(0x7E0, bytes((2, 1, 0)), self.signals, self.values,
+                                      {0x0C: 720, 0x0D: 42})
+        self.assertEqual(response, (0x7E8, bytes.fromhex("0641000018000000")))
+        self.assertIsNone(respond_to_request(0x7E1, bytes((2, 1, 0)), self.signals, self.values,
+                                            {0x0C: 720, 0x0D: 42}))
+
+    def test_support_masks_continue_to_later_standard_blocks(self):
+        _, first = build_support_frame(0, {0x0C, 0x0D, 0x42})
+        self.assertEqual(first, bytes.fromhex("0641000018000100"))
+        _, middle = build_support_frame(0x20, {0x0C, 0x0D, 0x42})
+        self.assertEqual(middle, bytes.fromhex("0641200000000100"))
+        _, last = build_support_frame(0x40, {0x0C, 0x0D, 0x42})
+        self.assertEqual(last, bytes.fromhex("0641404000000000"))
+        with self.assertRaises(ValueError):
+            build_support_frame(0x100, {0x0C})
 
     def test_brake_and_clutch_share_a_response_frame(self):
         can_id, brake = build_uds_frame("MX5_BPA_SW", 1, self.signals, dict(self.values))
