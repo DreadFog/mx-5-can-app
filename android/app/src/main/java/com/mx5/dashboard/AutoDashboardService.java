@@ -1,6 +1,7 @@
 package com.mx5.dashboard;
 
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -29,7 +30,10 @@ import java.util.Locale;
 
 public final class AutoDashboardService extends CarAppService {
     @NonNull @Override public HostValidator createHostValidator() {
-        return HostValidator.ALLOW_ALL_HOSTS_VALIDATOR;
+        if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            return HostValidator.ALLOW_ALL_HOSTS_VALIDATOR;
+        }
+        return new HostValidator.Builder(getApplicationContext()).build();
     }
 
     @NonNull @Override public Session onCreateSession() {
@@ -43,6 +47,7 @@ public final class AutoDashboardService extends CarAppService {
     private static final class DashboardScreen extends Screen {
         private final Handler handler = new Handler(Looper.getMainLooper());
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final NavigationTileRenderer navigationRenderer = new NavigationTileRenderer();
         private final Rect stableArea = new Rect();
         private final Rect visibleArea = new Rect();
         private final RpmEdgeView edgeView;
@@ -116,6 +121,7 @@ public final class AutoDashboardService extends CarAppService {
         private void drawDashboard() {
             if (surface == null || !surface.isValid() || surfaceWidth <= 0 || surfaceHeight <= 0) return;
             DashboardTelemetry.Snapshot snapshot = DashboardTelemetry.snapshot(SystemClock.elapsedRealtime());
+            NavigationState.Snapshot navigation = NavigationState.snapshot(SystemClock.elapsedRealtime());
             Canvas canvas = null;
             try {
                 canvas = surface.lockCanvas(null);
@@ -130,11 +136,12 @@ public final class AutoDashboardService extends CarAppService {
                 float top = area.top + padding;
                 float bottom = area.bottom - padding;
                 if (tileWidth <= 0 || bottom <= top) return;
-                drawTile(canvas, new RectF(area.left + padding, top, area.left + padding + tileWidth, bottom),
-                        "SPEED", snapshot.speed, "km/h", snapshot.speedSimulated);
-                drawTile(canvas, new RectF(area.left + padding + tileWidth + gap, top,
-                        area.left + padding + 2 * tileWidth + gap, bottom),
-                        "ENGINE", snapshot.rpm, "rpm", snapshot.rpmSimulated);
+                navigationRenderer.draw(canvas, new RectF(area.left + padding, top,
+                        area.left + padding + tileWidth, bottom), navigation);
+                RectF engineTile = new RectF(area.left + padding + tileWidth + gap, top,
+                        area.left + padding + 2 * tileWidth + gap, bottom);
+                drawTile(canvas, engineTile, "ENGINE", snapshot.rpm, "rpm", snapshot.rpmSimulated);
+                drawSpeed(canvas, engineTile, snapshot);
                 edgeView.layout(0, 0, surfaceWidth, surfaceHeight);
                 edgeView.setProgress(RpmAlert.progress(snapshot.rpm == null ? 0 : snapshot.rpm,
                         snapshot.threshold, snapshot.rpm != null));
@@ -167,7 +174,20 @@ public final class AutoDashboardService extends CarAppService {
             paint.setTextSize(Math.max(10, Math.min(height * 0.08f, tile.width() * 0.08f)));
             paint.setColor(Color.rgb(163, 183, 179));
             canvas.drawText(value == null ? unit : unit + (simulated ? "  /  SIM" : "  /  CAN"),
-                    tile.centerX(), tile.top + height * 0.78f, paint);
+                    tile.centerX(), tile.top + height * 0.76f, paint);
+        }
+
+        private void drawSpeed(Canvas canvas, RectF tile, DashboardTelemetry.Snapshot telemetry) {
+            Double speed = telemetry.speed;
+            String source = telemetry.speedSimulated ? "SIM" : "CAN";
+            String display = speed == null ? "-- km/h" : String.format(Locale.US, "%.0f km/h / %s", speed, source);
+            paint.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            paint.setTextAlign(Paint.Align.RIGHT);
+            paint.setColor(Color.WHITE);
+            paint.setTextSize(Math.min(tile.height() * 0.095f, tile.width() * 0.075f));
+            float width = paint.measureText(display);
+            if (width > tile.width() * 0.75f) paint.setTextSize(paint.getTextSize() * tile.width() * 0.75f / width);
+            canvas.drawText(display, tile.right - tile.width() * 0.06f, tile.bottom - tile.height() * 0.06f, paint);
         }
     }
 }

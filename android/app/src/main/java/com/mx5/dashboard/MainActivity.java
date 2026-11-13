@@ -64,6 +64,8 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     private static final int PAGE_LOGS = 1;
     private static final int PAGE_CONFIGURATION = 2;
     private static final int PAGE_DEBUG = 3;
+    private static final int PAGE_DESTINATION = 4;
+    private static final int NAVIGATION_PERMISSION = 51;
     private static final int BACKGROUND = Color.rgb(25, 33, 30);
     private static final int PANEL = Color.rgb(34, 45, 40);
     private static final int MUTED = Color.rgb(165, 181, 168);
@@ -91,6 +93,9 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     private Button logsTab;
     private Button configurationTab;
     private Button debugTab;
+    private Button destinationTab;
+    private DestinationPanel destinationPanel;
+    private NavigationClient.Destination pendingDestination;
     private DebugPanel debugPanel;
     private DebugPanel.Transport debugTransport;
     private final List<DiagnosticSignal> diagnosticSignals = new ArrayList<>();
@@ -418,28 +423,33 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         logsTab = button("LOGS", false);
         configurationTab = button("CONFIG", false);
         debugTab = button("DEBUG", false);
+        destinationTab = button("DESTINATION", false);
         LinearLayout.LayoutParams tabParams = new LinearLayout.LayoutParams(0, dp(44), 1);
         tabParams.setMargins(dp(3), 0, dp(3), 0);
         navigation.addView(dashboardTab, new LinearLayout.LayoutParams(tabParams));
         navigation.addView(logsTab, new LinearLayout.LayoutParams(tabParams));
         navigation.addView(configurationTab, new LinearLayout.LayoutParams(tabParams));
         navigation.addView(debugTab, new LinearLayout.LayoutParams(tabParams));
-        for (Button tab : new Button[]{dashboardTab, logsTab, configurationTab, debugTab}) {
+        navigation.addView(destinationTab, new LinearLayout.LayoutParams(tabParams));
+        for (Button tab : new Button[]{dashboardTab, logsTab, configurationTab, debugTab, destinationTab}) {
             tab.setTextSize(10);
             tab.setMinWidth(0);
             tab.setMinimumWidth(0);
             tab.setPadding(dp(2), 0, dp(2), 0);
+            tab.setAutoSizeTextTypeUniformWithConfiguration(7, 10, 1, android.util.TypedValue.COMPLEX_UNIT_SP);
         }
         dashboardTab.setOnClickListener(view -> showPage(PAGE_DASHBOARD));
         logsTab.setOnClickListener(view -> showPage(PAGE_LOGS));
         configurationTab.setOnClickListener(view -> showPage(PAGE_CONFIGURATION));
         debugTab.setOnClickListener(view -> showPage(PAGE_DEBUG));
+        destinationTab.setOnClickListener(view -> showPage(PAGE_DESTINATION));
 
         pageContainer = new FrameLayout(this);
         appLayout.addView(pageContainer, new LinearLayout.LayoutParams(-1, 0, 1));
         dashboardPage = page;
         logsPage = buildLogsPage();
         configurationPage = buildConfigurationPage();
+        destinationPanel = new DestinationPanel(this);
         debugTransport = new DebugPanel.Transport() {
             @Override public boolean ready() {
                 return !active && (connected || (simulatorClientConnected && (worker == null || !worker.isAlive())));
@@ -467,7 +477,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
 
         setContentView(appRoot);
         appRoot.requestApplyInsets();
-        showPage(PAGE_DASHBOARD);
+        showPage(getIntent().getBooleanExtra("destination_panel", false) ? PAGE_DESTINATION : PAGE_DASHBOARD);
         updateShiftAlert();
     }
 
@@ -636,6 +646,46 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         super.onResume();
         applyScreenAwake();
         refreshEnergyStatus();
+        if (destinationPanel != null) destinationPanel.resume();
+    }
+
+    @Override protected void onPause() {
+        if (destinationPanel != null) destinationPanel.pause();
+        super.onPause();
+    }
+
+    public void startNavigation(NavigationClient.Destination destination) {
+        pendingDestination = destination;
+        if (checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            List<String> permissions = new ArrayList<>();
+            permissions.add(android.Manifest.permission.ACCESS_COARSE_LOCATION);
+            permissions.add(android.Manifest.permission.ACCESS_FINE_LOCATION);
+            if (Build.VERSION.SDK_INT >= 33) permissions.add(android.Manifest.permission.POST_NOTIFICATIONS);
+            requestPermissions(permissions.toArray(new String[0]), NAVIGATION_PERMISSION);
+            return;
+        }
+        beginNavigation();
+    }
+
+    private void beginNavigation() {
+        NavigationClient.Destination destination = pendingDestination;
+        pendingDestination = null;
+        if (destination == null) return;
+        Intent intent = new Intent(this, NavigationService.class).putExtra("name", destination.name)
+                .putExtra("latitude", destination.point.latitude).putExtra("longitude", destination.point.longitude);
+        startForegroundService(intent);
+    }
+
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grants) {
+        super.onRequestPermissionsResult(requestCode, permissions, grants);
+        if (requestCode != NAVIGATION_PERMISSION) return;
+        if (checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED) beginNavigation();
+        else {
+            pendingDestination = null;
+            android.widget.Toast.makeText(this, "Precise location is required for guidance", android.widget.Toast.LENGTH_LONG).show();
+        }
     }
 
     private void saveModelYear() {
@@ -690,6 +740,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         if (page == PAGE_LOGS) selected = logsPage;
         else if (page == PAGE_CONFIGURATION) selected = configurationPage;
         else if (page == PAGE_DEBUG) selected = debugPanel;
+        else if (page == PAGE_DESTINATION) selected = destinationPanel;
         else selected = dashboardPage;
         pageContainer.removeAllViews();
         pageContainer.addView(selected, new FrameLayout.LayoutParams(-1, -1));
@@ -697,6 +748,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         setTabSelected(logsTab, page == PAGE_LOGS);
         setTabSelected(configurationTab, page == PAGE_CONFIGURATION);
         setTabSelected(debugTab, page == PAGE_DEBUG);
+        setTabSelected(destinationTab, page == PAGE_DESTINATION);
         if (page == PAGE_LOGS && logScroll != null) {
             logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
         }
@@ -1012,6 +1064,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        if (intent.getBooleanExtra("destination_panel", false)) showPage(PAGE_DESTINATION);
         UsbDevice attached = getUsbDevice(intent);
         if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(intent.getAction()) && isCanable(attached)) {
             device = attached;
@@ -1026,6 +1079,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         updateSessionWakeLock();
         DashboardTelemetry.clear("Phone dashboard closed");
         debugPanel.close();
+        destinationPanel.close();
         uiHandler.removeCallbacks(expireValues);
         uiHandler.removeCallbacks(simulatorPoll);
         if (session != null) session.stop();

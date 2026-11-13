@@ -9,7 +9,7 @@ Native Android app for a 2024 Mazda MX-5 ND and CANable `gs_usb` adapter. It con
 - Starts no CAN data transmission until the user explicitly taps **Start active reads**.
 - Active mode alternates the standard OBD-II engine RPM (`01 0C`) and vehicle speed (`01 0D`) read requests at up to 10 requests per second total (nominally 5 Hz per PID). Both responses have been verified on this vehicle while stationary.
 - Shows speed, RPM with a bottom-up 0-8,000 bar, and an unavailable gear field. No numeric gear signal for model year 2024 has been verified.
-- Separates the Dashboard, Logs, Configuration, and Debug pages; CAN counters and the USB/CAN event log are kept on Logs.
+- Separates the Dashboard, Logs, Configuration, Debug, and Destination pages; CAN counters and the USB/CAN event log are kept on Logs.
 - Provides a persistent shift-up threshold (default 6,000 RPM, configurable from 1,000 to 8,000 RPM). Transparent edge lighting gradually brightens from yellow at 75% of the threshold through orange at 90%, reaching bright red at or above the threshold. The dashboard stays visible and interactive. Transitions are smoothed over 100 ms; lighting fades with falling RPM and clears when the reading expires.
 - Provides USB/CAN diagnostics: adapter VID/PID, interface and endpoint addresses, firmware/hardware versions, CAN feature flags and clock, RX/TX counts, last raw frame, transmit confirmations, timestamps, and recent errors.
 - Stops on USB errors, missing transmit confirmation, or CAN bus-off. Measurements expire after three seconds.
@@ -36,11 +36,21 @@ Stop Dashboard active reads before using Debug. Debug and Dashboard polling are 
 
 On the car, every read-once/Live activation requires confirmation while parked. Some catalogue definitions target different model years and have not been verified on the 2024 MX-5. Only standard OBD/UDS read requests (services 01/22) are sent, never ECU writes or actuator commands. Single-frame diagnostic replies are supported; ISO-TP multi-frame replies are not assembled and time out. The CANable returns to listen-only when no Debug Live selection or pending request remains. Vehicle-side Debug/Live behavior still needs physical validation; simulator RPM/speed Live has been measured at approximately 10 Hz per value on the Pixel.
 
-## Experimental Android Auto (Debug Only)
+## GPS and Destination
 
-The debug APK includes a read-only Car App Library service, labelled **MX-5 Experimental**, for testing Android Auto hosts. The release build has neither the service nor the Car App Library dependency. This is a development prototype, not an officially approved Android Auto vehicle-dashboard category. It declares the navigation category to test a custom surface, but does not provide navigation or meet navigation app requirements. It may interfere with another navigation app, and its declaration does not establish eligibility or guarantee acceptance by a real head unit. Test only while parked.
+The **Destination** panel searches addresses and places through Nominatim and displays an OpenStreetMap map. Select a search result or long-press the map, then tap **Start guidance** while parked. The selected destination is saved locally, but guidance never starts automatically. Grant precise location permission and enable phone location. The stop icon or the foreground navigation notification stops guidance. Selecting another destination does not change the active route until Start guidance is tapped again.
 
-The Auto screen draws speed and RPM in equal tiles on a navigation-template surface. It uses the phone's configured RPM threshold and edge lighting, updating approximately ten times per second. Values expire after three seconds; SIM/CAN source is shown for fresh measurements. The Android Auto host controls its own system UI and available screen area. The phone's Debug controls are not projected, and there are no CAN transmit controls on the Auto screen.
+OSRM computes a driving route. A location foreground service follows it independently of the phone activity, including while the activity is backgrounded or destroyed. The service does not restart automatically after process termination. It waits for a recent fix accurate to 50 m or better, hides instructions after 10 seconds without a reliable fix, and recalculates when more than 60 m off route. Failed requests retry with subsequent location updates, no more often than every 15 seconds.
+
+The turn tile uses rally-style light, medium, and sharp left/right arrows, a dedicated roundabout sign with the exit number when available, a U-turn arrow, and a destination flag. Distances follow route geometry and round upward in 50 m increments (51 m displays as 100 m). These are OSRM road-navigation instructions, not surveyed rally pace notes. **The small speed indicator uses only the existing vehicle OBD/CAN values**, or explicitly labelled SIM values during simulator testing. GPS speed is never acquired or displayed; absent or expired vehicle speed shows `--`.
+
+Internet is required for search, initial routing, recalculation, and uncached map tiles. A loaded route can continue offline while the vehicle stays on that route. Nominatim receives the typed search, OSRM receives start/destination coordinates, and the OSM tile server receives map tile requests. Searches are explicit (no autocomplete), with one in-flight request and at least one second between searches. Map attribution is displayed. Public Nominatim and OSRM demo servers have usage limits and no availability guarantee; use appropriately configured production/self-hosted services before distributing this prototype. Offline map downloads and voice guidance are not implemented.
+
+## Experimental Android Auto
+
+Both debug and release APKs include the Car App Library service, labelled **MX-5 Experimental**, and its navigation surface. Android Auto support is no longer conditional on the debug source set. This remains a prototype, not an officially approved vehicle-dashboard category. Basic turn guidance does not establish compliance with all Android Auto navigation app requirements or guarantee acceptance by a real head unit. It may interfere with another navigation app. Test only while parked.
+
+The Auto screen draws the next maneuver in the left half and RPM in the right half, with a small vehicle speed indicator at the bottom right. Select and start the destination in the phone's Destination panel. With no active route, the left tile shows navigation status. RPM threshold and edge lighting follow the phone configuration, updating approximately ten times per second. Vehicle values expire after three seconds, with SIM/CAN source shown for fresh measurements. The host controls system UI and available screen area. Phone Debug controls are not projected, and the Auto screen has no CAN transmit controls.
 
 Acquisition still belongs to the phone activity: open the phone dashboard, connect the adapter or PC simulator, and start the desired reads there while parked. The Auto service does not open USB, start polling, or request USB permission. Android may destroy the phone activity in the background; if it does, acquisition stops and the Auto screen loses its values. A standalone foreground acquisition service is not implemented by this prototype.
 
@@ -79,7 +89,7 @@ Complete any Android Auto onboarding prompts on the phone. Look for **MX-5 Exper
 
 The **Unknown sources** developer option is not a general override for Car App Library apps. Debug/DHU testing and real-vehicle install-source checks differ; a real head unit may reject an ADB-installed app, and Google Play Internal App Sharing may be needed. Do not assume that appearing in Android package discovery means the host has accepted the app. See [Google's real-vehicle testing rules](https://developer.android.com/training/cars/testing#unknown-sources) and the [DHU guide](https://developer.android.com/training/cars/testing/dhu).
 
-For this debug-only prototype, host validation accepts all local hosts to permit testing. Do not distribute this APK on an untrusted device; it exposes telemetry to a bound host, although it cannot transmit on CAN. Restrict host validation before any broader use.
+Debug builds accept all hosts to permit local testing; do not distribute a debug APK on an untrusted device. Release builds use the Car App Library's default host validator, which requires the host's template-renderer permission. A broader host allowlist, release signing, and Android Auto distribution approval remain separate requirements. The Auto service exposes telemetry to accepted hosts but cannot transmit on CAN.
 
 ## Wireless ADB and Screen Mirroring
 
@@ -180,8 +190,14 @@ javac -d /tmp/mx5-protocol-test \
   app/src/main/java/com/mx5/dashboard/DashboardTelemetry.java \
   app/src/main/java/com/mx5/dashboard/TransmissionFilter.java \
   app/src/main/java/com/mx5/dashboard/ObdPidDiscovery.java \
+  app/src/main/java/com/mx5/dashboard/DiagnosticReply.java \
+  app/src/main/java/com/mx5/dashboard/IsoTpReceiver.java \
+  app/src/main/java/com/mx5/dashboard/NavigationRoute.java \
+  app/src/main/java/com/mx5/dashboard/NavigationState.java \
   tests/ProtocolTest.java
 java -cp /tmp/mx5-protocol-test ProtocolTest
 ```
+
+This also exercises maneuver classification, route progression, arrival, GPS expiry, and 50 m increments. Run the OSRM JSON fixture tests without live network access using `./gradlew :app:testDebugUnitTest`.
 
 The app has been compiled as a debug APK. Hardware USB enumeration, Android's permission dialog, CAN reception, and vehicle responses still require testing with the Pixel 9 and CANable physically connected. The APK is unsigned for release and intended for local debug installation only.

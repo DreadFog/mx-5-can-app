@@ -8,10 +8,55 @@ import com.mx5.dashboard.TransmissionFilter;
 import com.mx5.dashboard.ObdPidDiscovery;
 import com.mx5.dashboard.DiagnosticReply;
 import com.mx5.dashboard.IsoTpReceiver;
+import com.mx5.dashboard.NavigationRoute;
+import com.mx5.dashboard.NavigationState;
 import java.util.Arrays;
 
 public class ProtocolTest {
     public static void main(String[] args) {
+        check(NavigationRoute.roundedDistance(1) == 50, "navigation rounds up to 50m");
+        check(NavigationRoute.roundedDistance(50) == 50, "navigation exact 50m boundary");
+        check(NavigationRoute.roundedDistance(51) == 100, "navigation next 50m increment");
+        check(NavigationRoute.roundedDistance(0) == 0, "navigation arrival distance");
+        check(NavigationRoute.classify("turn", "slight left") == NavigationRoute.Turn.LIGHT_LEFT, "light left");
+        check(NavigationRoute.classify("turn", "right") == NavigationRoute.Turn.MEDIUM_RIGHT, "medium right");
+        check(NavigationRoute.classify("turn", "sharp left") == NavigationRoute.Turn.SHARP_LEFT, "sharp left");
+        check(NavigationRoute.classify("turn", "left") == NavigationRoute.Turn.MEDIUM_LEFT, "medium left");
+        check(NavigationRoute.classify("turn", "slight right") == NavigationRoute.Turn.LIGHT_RIGHT, "light right");
+        check(NavigationRoute.classify("turn", "sharp right") == NavigationRoute.Turn.SHARP_RIGHT, "sharp right");
+        check(NavigationRoute.classify("rotary", "right") == NavigationRoute.Turn.ROUNDABOUT, "roundabout priority");
+        NavigationRoute.Point origin = new NavigationRoute.Point(0, 0);
+        NavigationRoute.Point corner = new NavigationRoute.Point(0, 0.001);
+        NavigationRoute.Point end = new NavigationRoute.Point(0.001, 0.001);
+        double leg = NavigationRoute.distance(origin, corner);
+        NavigationRoute route = new NavigationRoute(Arrays.asList(origin, corner, end), Arrays.asList(
+            new NavigationRoute.Cue(NavigationRoute.Turn.MEDIUM_LEFT, leg, 0),
+            new NavigationRoute.Cue(NavigationRoute.Turn.ARRIVE, leg * 2, 0)));
+        route.update(origin);
+        check(route.next().turn == NavigationRoute.Turn.MEDIUM_LEFT, "first route maneuver");
+        check(Math.abs(route.remaining() - leg) < 1, "distance follows route geometry");
+        route.update(new NavigationRoute.Point(0.02, 0.02));
+        check(Math.abs(route.remaining() - leg) < 1, "off route fix does not advance");
+        route.update(new NavigationRoute.Point(0, 0.0005));
+        double remaining = route.remaining();
+        route.update(origin);
+        check(route.remaining() == remaining, "GPS jitter does not rewind progress");
+        route.update(new NavigationRoute.Point(0, 0.00095));
+        check(route.next().turn == NavigationRoute.Turn.MEDIUM_LEFT, "turn remains visible five metres before junction");
+        route.update(corner);
+        check(route.next().turn == NavigationRoute.Turn.ARRIVE, "passed turn advances");
+        route.update(end);
+        check(route.arrived(), "arrival detected");
+        NavigationRoute nearEnd = new NavigationRoute(Arrays.asList(origin, corner, end), route.cues);
+        nearEnd.update(new NavigationRoute.Point(0.001, 0.0015));
+        check(!nearEnd.arrived(), "nearby parallel road is not arrival");
+        NavigationState.publish(new NavigationState.Snapshot(NavigationState.Status.GUIDING, "End", "Guiding",
+                NavigationRoute.Turn.MEDIUM_LEFT, 100, 0, 1000, route.points));
+        check(NavigationState.snapshot(11000).hasCue(), "guidance fresh at ten second boundary");
+        check(!NavigationState.snapshot(11001).hasCue(), "stale fix hides turn");
+        NavigationState.publish(new NavigationState.Snapshot(NavigationState.Status.ERROR, "End", "Offline",
+            NavigationRoute.Turn.STRAIGHT, 0, 0, 1000, route.points));
+        check(NavigationState.snapshot(11001).status == NavigationState.Status.ERROR, "offline state remains visible");
         DiagnosticSignal standard = new DiagnosticSignal("VPWR", "Voltage", "volts", 0x7E0, 0x7E8,
             0x42, true, 0, 16, 1, 1000, 0, false, null, null);
         check(standard.request(0).data[2] == 0x42, "discovered PID request");
