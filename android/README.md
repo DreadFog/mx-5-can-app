@@ -22,7 +22,9 @@ The host-side encoder tests run with `python3 -m unittest discover -s tools -v` 
 
 ## Debug Values and Live Polling
 
-Debug lists standard OBD RPM/speed and all 91 UDS signals from the packaged `default.json` catalogue. Each row displays its request/response IDs, last value, raw response bytes, CAN/SIM source, and FRESH/STALE status. The refresh icon sends one diagnostic request; the Live checkbox polls that value with a 100 ms target interval. The pause icon stops all Debug reads. Live remains selected when switching pages, but never resumes automatically after a disconnect or app restart.
+Debug lists standard OBD RPM/speed and the UDS signals matching the configured model year from the packaged `default.json` catalogue. Each row displays its request/response IDs, last value, raw response bytes, CAN/SIM source, and FRESH/STALE status. The refresh icon sends one diagnostic request; the Live checkbox polls that value with a 100 ms target interval. The pause icon stops all Debug reads. Live remains selected when switching pages, but never resumes automatically after a disconnect or app restart.
+
+Set Model Year in Configuration and save it. The default is 2024, and the setting is retained after restarting the app. Saving a year stops Debug Live reads, clears its last values, and rebuilds its catalogue; 2024 exposes 38 signals including RPM/speed. Catalogue `filter` rules use inclusive alternatives: `from` means that year or newer, `to` means that year or older, and `years` lists additional matching years. Commands without a `filter` remain available. `dbg` and `dbgfilter` are exploratory metadata, not vehicle-year exclusion rules; matching the year does not establish that a command works on a particular ECU. The PC simulator retains its complete 91-signal catalogue.
 
 Stop Dashboard active reads before using Debug. Debug and Dashboard polling are mutually exclusive. Debug targets 10 Hz per selected value; the existing Dashboard still alternates RPM/speed at 10 requests/s total. Debug serializes requests rather than building a backlog, so slower ECU/USB responses and many selected values reduce the achieved rate. Negative replies, invalid responses and timeouts stop the affected Live signal; disconnects stop all selections. Last values remain visible and become stale after three seconds.
 
@@ -123,6 +125,7 @@ javac -d /tmp/mx5-protocol-test \
   app/src/main/java/com/mx5/dashboard/Obd.java \
   app/src/main/java/com/mx5/dashboard/RpmAlert.java \
   app/src/main/java/com/mx5/dashboard/DiagnosticSignal.java \
+  app/src/main/java/com/mx5/dashboard/ModelYearFilter.java \
   tests/ProtocolTest.java
 java -cp /tmp/mx5-protocol-test ProtocolTest
 ```

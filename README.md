@@ -8,6 +8,7 @@ Native Android dashboard for a 2024 Mazda MX-5 ND. The Pixel 9 connects directly
 - Starts in CAN listen-only mode. Active mode alternates standard OBD-II RPM (`01 0C`) and speed (`01 0D`) requests at up to 10 requests per second total.
 - Provides separate Dashboard, Logs, Configuration, and Debug pages.
 - Debug shows the latest decoded and raw OBD/UDS responses with CAN/SIM source and freshness. Each value has a read-once button and a Live checkbox targeting 10 Hz per selected value.
+- Configuration stores the vehicle model year (default 2024). Debug applies the catalogue's model-year filters; 2024 exposes 38 signals including standard RPM/speed.
 - The configurable RPM shift threshold defaults to 6,000 RPM. Edge lighting fades in from yellow at 75% of the threshold, transitions through orange at 90%, and reaches bright red at or above the threshold. The dashboard remains visible.
 - The CANable disconnects and returns to listen-only when active reads are stopped or the session closes.
 
@@ -33,7 +34,7 @@ The debug APK is intended for local installation, not release distribution. See 
 
 Open Debug after connecting a CANable session or the PC simulator. Stop Dashboard active reads first. Use the refresh icon to request a value once, or check Live to monitor it at a target of 10 Hz. The pause icon stops all Debug Live reads. Debug polling continues across pages, but selections are not saved across app restarts or reconnections.
 
-The panel includes standard RPM/speed and the 91 UDS catalogue signals. Values remain visible when stale; negative UDS responses, invalid values, and timeouts are shown instead of inventing measurements. Several catalogue signals target other model years and are not verified on this vehicle. Physical requests require confirmation while parked; no actuator/write services are sent.
+The panel includes standard RPM/speed and the UDS catalogue signals matching the configured model year. Change the year in Configuration and save it to rebuild Debug; current Debug Live reads stop and its displayed values are reset. The default is 2024 (38 signals). Values remain visible when stale; negative UDS responses, invalid values, and timeouts are shown instead of inventing measurements. Year compatibility does not guarantee ECU support. Physical requests require confirmation while parked; no actuator/write services are sent.
 
 Debug requests are serialized, with one response awaited at a time. The target is 10 Hz per selected value, not a guarantee: slow ECUs or many selections reduce the achieved rate without queuing a backlog. A timeout or negative response stops that signal's Live polling; disconnects stop all Debug reads. Physical CAN returns to listen-only once the final pending request finishes and no Live selection remains. Debug Live and Dashboard polling are mutually exclusive; the Dashboard's existing 10 requests/s total cadence is unchanged.
 

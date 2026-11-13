@@ -13,6 +13,10 @@ public final class DiagnosticCatalog {
     private DiagnosticCatalog() { }
 
     public static List<DiagnosticSignal> load(InputStream input) throws IOException, JSONException {
+        return load(input, 2024);
+    }
+
+    public static List<DiagnosticSignal> load(InputStream input, int modelYear) throws IOException, JSONException {
         List<DiagnosticSignal> signals = new ArrayList<>();
         signals.add(new DiagnosticSignal("OBD_RPM", "Engine RPM", "rpm", 0x7DF, 0x7E8,
                 Obd.RPM, true, 0, 16, 1, 4, 0, false, null, null));
@@ -29,6 +33,17 @@ public final class DiagnosticCatalog {
         JSONArray commands = new JSONObject(json).getJSONArray("commands");
         for (int index = 0; index < commands.length(); index++) {
             JSONObject command = commands.getJSONObject(index);
+            JSONObject filter = command.optJSONObject("filter");
+            if (filter != null) {
+                JSONArray listed = filter.optJSONArray("years");
+                int[] years = new int[listed == null ? 0 : listed.length()];
+                for (int yearIndex = 0; yearIndex < years.length; yearIndex++) {
+                    years[yearIndex] = listed.getInt(yearIndex);
+                }
+                if (!ModelYearFilter.matches(modelYear,
+                        filter.has("from") ? filter.getInt("from") : null,
+                        filter.has("to") ? filter.getInt("to") : null, years)) continue;
+            }
             String did = command.getJSONObject("cmd").optString("22", "");
             if (did.length() != 4) continue;
             JSONArray definitions = command.getJSONArray("signals");

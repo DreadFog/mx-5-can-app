@@ -44,6 +44,8 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     private static final String USB_PERMISSION = "com.mx5.dashboard.USB_PERMISSION";
     private static final String PREFERENCES = "dashboard_preferences";
     private static final String KEY_RPM_THRESHOLD = "rpm_threshold";
+    private static final String KEY_MODEL_YEAR = "model_year";
+    private static final int DEFAULT_MODEL_YEAR = 2024;
     private static final int DEFAULT_RPM_THRESHOLD = 6000;
     private static final int MIN_RPM_THRESHOLD = 1000;
     private static final int MAX_RPM_THRESHOLD = 8000;
@@ -80,8 +82,12 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     private Button configurationTab;
     private Button debugTab;
     private DebugPanel debugPanel;
+    private DebugPanel.Transport debugTransport;
     private final List<DiagnosticSignal> diagnosticSignals = new ArrayList<>();
     private EditText thresholdInput;
+    private EditText modelYearInput;
+    private TextView modelYearSummary;
+    private int modelYear = DEFAULT_MODEL_YEAR;
     private ScrollView logScroll;
     private FrameLayout appRoot;
     private FrameLayout pageContainer;
@@ -195,8 +201,9 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
         SharedPreferences preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE);
         rpmThreshold = preferences.getInt(KEY_RPM_THRESHOLD, DEFAULT_RPM_THRESHOLD);
+        modelYear = preferences.getInt(KEY_MODEL_YEAR, DEFAULT_MODEL_YEAR);
         try {
-            diagnosticSignals.addAll(DiagnosticCatalog.load(getAssets().open("default.json")));
+            diagnosticSignals.addAll(DiagnosticCatalog.load(getAssets().open("default.json"), modelYear));
         } catch (IOException | JSONException error) {
             android.util.Log.e("Mx5Debug", "Unable to load diagnostic catalogue", error);
         }
@@ -393,7 +400,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         dashboardPage = page;
         logsPage = buildLogsPage();
         configurationPage = buildConfigurationPage();
-        debugPanel = new DebugPanel(this, diagnosticSignals, new DebugPanel.Transport() {
+        debugTransport = new DebugPanel.Transport() {
             @Override public boolean ready() {
                 return !active && (connected || (simulatorClientConnected && (worker == null || !worker.isAlive())));
             }
@@ -413,7 +420,8 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
             }
 
             @Override public void log(String message) { addLog(message); }
-        });
+        };
+        debugPanel = new DebugPanel(this, diagnosticSignals, debugTransport);
         shiftAlertOverlay = buildShiftAlertOverlay();
         appRoot.addView(shiftAlertOverlay, new FrameLayout.LayoutParams(-1, -1));
 
@@ -490,7 +498,50 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         Button saveThreshold = button("SAVE THRESHOLD", true);
         settings.addView(saveThreshold, new LinearLayout.LayoutParams(-1, dp(48)));
         saveThreshold.setOnClickListener(view -> saveRpmThreshold());
+        LinearLayout vehicleSettings = panel(content);
+        vehicleSettings.addView(text("MODEL YEAR", 12, MUTED, true));
+        modelYearInput = new EditText(this);
+        modelYearInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        modelYearInput.setSingleLine(true);
+        modelYearInput.setSelectAllOnFocus(true);
+        modelYearInput.setTextSize(24);
+        modelYearInput.setTextColor(Color.WHITE);
+        modelYearInput.setText(String.valueOf(modelYear));
+        modelYearInput.setBackgroundTintList(android.content.res.ColorStateList.valueOf(LIME));
+        vehicleSettings.addView(modelYearInput, new LinearLayout.LayoutParams(-1, dp(58)));
+        modelYearSummary = text(String.format(Locale.US, "%d / %d signals", modelYear, diagnosticSignals.size()), 12, MUTED, false);
+        vehicleSettings.addView(modelYearSummary);
+        Button saveYear = button("SAVE MODEL YEAR", true);
+        vehicleSettings.addView(saveYear, new LinearLayout.LayoutParams(-1, dp(48)));
+        saveYear.setOnClickListener(view -> saveModelYear());
         return page;
+    }
+
+    private void saveModelYear() {
+        int selectedYear;
+        try {
+            selectedYear = Integer.parseInt(modelYearInput.getText().toString().trim());
+            if (selectedYear < 1989 || selectedYear > 2100) throw new NumberFormatException();
+        } catch (NumberFormatException error) {
+            modelYearInput.setError("Enter a model year from 1989 to 2100");
+            return;
+        }
+        try {
+            List<DiagnosticSignal> filtered = DiagnosticCatalog.load(getAssets().open("default.json"), selectedYear);
+            debugPanel.close();
+            modelYear = selectedYear;
+            diagnosticSignals.clear();
+            diagnosticSignals.addAll(filtered);
+            debugPanel = new DebugPanel(this, diagnosticSignals, debugTransport);
+            getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit().putInt(KEY_MODEL_YEAR, modelYear).apply();
+            modelYearInput.setError(null);
+            modelYearInput.clearFocus();
+            modelYearSummary.setText(String.format(Locale.US, "%d / %d signals", modelYear, diagnosticSignals.size()));
+            addLog("Model year " + modelYear + ": " + diagnosticSignals.size() + " filtered diagnostic signals");
+        } catch (IOException | JSONException error) {
+            modelYearInput.setError("Unable to load the diagnostic catalogue");
+            addLog("Model year catalogue error: " + error.getMessage());
+        }
     }
 
     private RpmEdgeView buildShiftAlertOverlay() {

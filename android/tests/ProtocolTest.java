@@ -2,10 +2,22 @@ import com.mx5.dashboard.CanFrame;
 import com.mx5.dashboard.Obd;
 import com.mx5.dashboard.RpmAlert;
 import com.mx5.dashboard.DiagnosticSignal;
+import com.mx5.dashboard.ModelYearFilter;
 import java.util.Arrays;
 
 public class ProtocolTest {
     public static void main(String[] args) {
+        check(ModelYearFilter.matches(2024, null, null, new int[0]), "unfiltered year allowed");
+        check(ModelYearFilter.matches(2016, 2016, null, new int[0]), "from boundary inclusive");
+        check(!ModelYearFilter.matches(2015, 2016, null, new int[0]), "year before from excluded");
+        check(ModelYearFilter.matches(2015, null, 2015, new int[0]), "to boundary inclusive");
+        check(!ModelYearFilter.matches(2024, null, 2015, new int[0]), "old-generation signals excluded");
+        check(ModelYearFilter.matches(2024, null, null, new int[]{2017, 2024}), "explicit year allowed");
+        check(!ModelYearFilter.matches(2023, null, null, new int[]{2017, 2024}), "unlisted year excluded");
+        check(ModelYearFilter.matches(2024, 2016, 2005, new int[0]), "disjoint ranges union newer");
+        check(ModelYearFilter.matches(2005, 2016, 2005, new int[0]), "disjoint ranges union older");
+        check(!ModelYearFilter.matches(2010, 2016, 2005, new int[0]), "gap between ranges excluded");
+        check(ModelYearFilter.matches(2010, 2016, 2005, new int[]{2010}), "explicit year fills gap");
         DiagnosticSignal map = new DiagnosticSignal("MAP", "MAP", "volts", 0x7E0, 0x7E8,
             0x0301, false, 0, 16, 1, 1000, 0, false, null, null);
         check(Arrays.equals(map.request(3).data, new byte[]{3, 0x22, 3, 1, 0, 0, 0, 0}), "UDS request");
