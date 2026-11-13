@@ -198,6 +198,6 @@ javac -d /tmp/mx5-protocol-test \
 java -cp /tmp/mx5-protocol-test ProtocolTest
 ```
 
-This also exercises maneuver classification, route progression, arrival, GPS expiry, and 50 m increments. Run the OSRM JSON fixture tests without live network access using `./gradlew :app:testDebugUnitTest`.
+This also exercises maneuver classification, route progression, arrival, GPS expiry, and 50 m increments. Run the OSRM JSON fixtures and the nonvisual Destination panel lifecycle regression test using `./gradlew :app:testDebugUnitTest`. The lifecycle test switches away from and back to Destination while a route update arrives, verifying that osmdroid overlays survive temporary view detachment and the activity closes cleanly.
 
 The app has been compiled as a debug APK. Hardware USB enumeration, Android's permission dialog, CAN reception, and vehicle responses still require testing with the Pixel 9 and CANable physically connected. The APK is unsigned for release and intended for local debug installation only.

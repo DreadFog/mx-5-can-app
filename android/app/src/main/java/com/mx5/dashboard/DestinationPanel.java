@@ -108,6 +108,7 @@ public final class DestinationPanel extends ScrollView {
         content.addView(status);
         Configuration.getInstance().setUserAgentValue(activity.getPackageName() + "/1.0");
         map = new MapView(activity);
+        map.setDestroyMode(false);
         map.setTileSource(TileSourceFactory.MAPNIK);
         map.setMultiTouchControls(true);
         map.getZoomController().setVisibility(org.osmdroid.views.CustomZoomButtonsController.Visibility.SHOW_AND_FADEOUT);

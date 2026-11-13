@@ -19,6 +19,8 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
+    testOptions.unitTests.includeAndroidResources = true
+
     sourceSets.main.assets.srcDir layout.buildDirectory.dir('generated/diagnosticAssets')
 }
 
@@ -36,5 +38,6 @@ dependencies {
     implementation 'org.osmdroid:osmdroid-android:6.1.20'
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.json:json:20240303'
+    testImplementation 'org.robolectric:robolectric:4.14.1'
     implementation 'androidx.car.app:app:1.4.0'
 }
