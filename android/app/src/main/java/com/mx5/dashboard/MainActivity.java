@@ -50,7 +50,7 @@ import org.json.JSONException;
 
 public final class MainActivity extends Activity implements GsUsb.Listener {
     private static final String USB_PERMISSION = "com.mx5.dashboard.USB_PERMISSION";
-    private static final String PREFERENCES = "dashboard_preferences";
+    private static final String PREFERENCES = CarPaint.PREFERENCES;
     private static final String KEY_RPM_THRESHOLD = "rpm_threshold";
     private static final String KEY_MODEL_YEAR = "model_year";
     private static final String KEY_MANUAL_TRANSMISSION = "manual_transmission";
@@ -59,7 +59,6 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     private static final int DEFAULT_RPM_THRESHOLD = 6000;
     private static final int MIN_RPM_THRESHOLD = 1000;
     private static final int MAX_RPM_THRESHOLD = 8000;
-    private static final long SIM_REQUEST_INTERVAL_MS = 100;
     private static final int PAGE_DASHBOARD = 0;
     private static final int PAGE_LOGS = 1;
     private static final int PAGE_CONFIGURATION = 2;
@@ -88,7 +87,6 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     private TextView lastFrameText;
     private TextView logText;
     private Button connectButton;
-    private Button readButton;
     private Button dashboardTab;
     private Button logsTab;
     private Button configurationTab;
@@ -98,10 +96,13 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     private NavigationClient.Destination pendingDestination;
     private DebugPanel debugPanel;
     private DebugPanel.Transport debugTransport;
+    private DashboardPoller dashboardPoller;
+    private boolean dashboardReadsEnabled = true;
     private final List<DiagnosticSignal> diagnosticSignals = new ArrayList<>();
     private EditText thresholdInput;
     private EditText modelYearInput;
     private TextView modelYearSummary;
+    private android.widget.Spinner carPaintPicker;
     private int modelYear = DEFAULT_MODEL_YEAR;
     private boolean manualTransmission = true;
     private RadioButton manualChoice;
@@ -125,9 +126,6 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     private boolean connected;
     private boolean active;
     private boolean simulatorClientConnected;
-    private int simulatorPid = Obd.RPM;
-    private int simulatorEchoId;
-    private int pendingSimulatorSequence = -1;
     private int rpmThreshold = DEFAULT_RPM_THRESHOLD;
     private double latestRpm;
     private long rpmUpdatedAt;
@@ -148,23 +146,20 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
                 speedText.setText("--");
                 speedUpdatedAt = 0;
             }
+            DashboardTelemetry.Reading gear = DashboardTelemetry.snapshot(now).reading("GEAR_ACT");
+            gearText.setText(gear == null ? "--" : gear.value == 0 ? "N" : String.format(Locale.US, "%.0f", gear.value));
             updateSessionWakeLock();
             uiHandler.postDelayed(this, 250);
         }
     };
-    private final Runnable simulatorPoll = new Runnable() {
+    private final Runnable dashboardPoll = new Runnable() {
         @Override public void run() {
-            if (!active || connected || !simulatorClientConnected || simulationBridge == null
-                    || pendingSimulatorSequence != -1) return;
-            try {
-                CanFrame request = Obd.request(simulatorPid, simulatorEchoId);
-                pendingSimulatorSequence = simulationBridge.sendFrame(request);
-                addLog(String.format(Locale.US, "SIM TX 7DF  02 01 %02X", simulatorPid));
-                simulatorEchoId = (simulatorEchoId + 1) % 10;
-                simulatorPid = simulatorPid == Obd.RPM ? Obd.SPEED : Obd.RPM;
-            } catch (IOException | JSONException error) {
-                stopSimulatorReads("PC simulator send failed: " + error.getMessage());
-            }
+            if (destroyed) return;
+            updateDashboardAcquisition();
+            boolean available = connected ? session != null && !session.readPending()
+                    : simulatorClientConnected && (worker == null || !worker.isAlive());
+            dashboardPoller.tick(SystemClock.elapsedRealtime(), DashboardTelemetry.page(), active && available);
+            uiHandler.postDelayed(this, 25);
         }
     };
 
@@ -243,7 +238,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(usbReceiver, filter);
-        addLog("App started. CAN transmission is disabled by default.");
+        addLog("App started. Read-only telemetry starts automatically when a source connects; test while parked.");
         try {
             simulationBridge = new SimulationBridge(new SimulationBridge.Listener() {
                 @Override public void onConnectionChanged(boolean linkConnected) {
@@ -260,6 +255,8 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
                             addLog("Rejected SIM reply while physical CAN session is open");
                             return;
                         }
+                        DashboardTelemetry.acceptReply(reply, SystemClock.elapsedRealtime(), true);
+                        dashboardPoller.accept(reply, SystemClock.elapsedRealtime());
                         debugPanel.acceptReply(reply, true);
                         receivedFrames++;
                         receiveText.setText(String.format(Locale.US, "SIM frames   %d", receivedFrames));
@@ -270,24 +267,12 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
 
                 @Override public void onTransmitConfirmation(int sequence, boolean accepted) {
                     runOnUiThread(() -> {
-                        if (debugPanel.acknowledge(sequence, accepted)) {
+                        if (dashboardPoller.acknowledge(sequence, accepted, SystemClock.elapsedRealtime())
+                                || debugPanel.acknowledge(sequence, accepted)) {
                             if (accepted) {
                                 transmittedFrames++;
                                 transmitText.setText(String.format(Locale.US, "SIM TX requests  %d", transmittedFrames));
                             }
-                            return;
-                        }
-                        if (sequence != pendingSimulatorSequence) return;
-                        pendingSimulatorSequence = -1;
-                        if (accepted) {
-                            transmittedFrames++;
-                            transmitText.setText(String.format(Locale.US, "SIM TX requests  %d", transmittedFrames));
-                            addLog("PC simulator accepted active read " + sequence);
-                            if (active && simulatorClientConnected) {
-                                uiHandler.postDelayed(simulatorPoll, SIM_REQUEST_INTERVAL_MS);
-                            }
-                        } else {
-                            stopSimulatorReads("PC simulator rejected active read " + sequence);
                         }
                     });
                 }
@@ -301,6 +286,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
             addLog("PC simulator unavailable: " + error.getMessage());
         }
         uiHandler.post(expireValues);
+        uiHandler.post(dashboardPoll);
         findAdapter();
         if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(getIntent().getAction())) {
             UsbDevice attached = getUsbDevice(getIntent());
@@ -309,6 +295,9 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
                 addLog("CANable attachment detected");
                 requestUsbPermission();
             }
+        } else if (device != null) {
+            if (usbManager.hasPermission(device)) startSession();
+            else requestUsbPermission();
         }
     }
 
@@ -383,19 +372,13 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         gearPanel.addView(gearLabel, new LinearLayout.LayoutParams(0, -2, 1));
         gearText = text("--", 32, Color.WHITE, true);
         gearPanel.addView(gearText);
-        TextView gearNote = text("Not confirmed for model year 2024", 10, MUTED, false);
+        TextView gearNote = text("ECU-reported gear; -- when unsupported. Gear 1 may also represent reverse.", 10, MUTED, false);
         gearNote.setPadding(0, dp(8), 0, 0);
         content.addView(gearNote);
 
-        readButton = button("START ACTIVE READS", true);
-        readButton.setEnabled(false);
-        LinearLayout.LayoutParams readParams = new LinearLayout.LayoutParams(-1, dp(52));
-        readParams.topMargin = dp(18);
-        content.addView(readButton, readParams);
-        TextView safety = text("Passive listening by default. Active reads send only standard RPM and speed requests. Test while parked.", 11, MUTED, false);
+        TextView safety = text("Telemetry reads start automatically on connection. Disconnect to stop. Test while parked.", 11, MUTED, false);
         safety.setPadding(0, dp(9), 0, dp(18));
         content.addView(safety);
-        readButton.setOnClickListener(view -> toggleReads());
 
         appRoot = new FrameLayout(this);
         appRoot.setBackgroundColor(BACKGROUND);
@@ -452,10 +435,22 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         destinationPanel = new DestinationPanel(this);
         debugTransport = new DebugPanel.Transport() {
             @Override public boolean ready() {
-                return !active && (connected || (simulatorClientConnected && (worker == null || !worker.isAlive())));
+                return !active && !dashboardReadsEnabled
+                    && (dashboardPoller == null || !dashboardPoller.busy())
+                    && (connected ? session != null && !session.readPending()
+                        : simulatorClientConnected && (worker == null || !worker.isAlive()));
             }
 
             @Override public boolean physical() { return connected; }
+
+            @Override public boolean dashboardReadsEnabled() { return dashboardReadsEnabled; }
+
+            @Override public void setDashboardReadsEnabled(boolean enabled) {
+                if (enabled) debugPanel.stop("Automatic dashboard reads resumed");
+                dashboardReadsEnabled = enabled;
+                updateDashboardAcquisition();
+                addLog(enabled ? "Automatic dashboard reads resumed by user" : "Automatic dashboard reads paused by user");
+            }
 
             @Override public int send(DiagnosticSignal signal) throws Exception {
                 if (connected && session != null) {
@@ -472,6 +467,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
             @Override public void log(String message) { addLog(message); }
         };
         debugPanel = new DebugPanel(this, diagnosticSignals, debugTransport);
+        configureDashboardPolling();
         shiftAlertOverlay = buildShiftAlertOverlay();
         appRoot.addView(shiftAlertOverlay, new FrameLayout.LayoutParams(-1, -1));
 
@@ -579,6 +575,31 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         Button saveYear = button("SAVE VEHICLE CONFIGURATION", true);
         vehicleSettings.addView(saveYear, new LinearLayout.LayoutParams(-1, dp(48)));
         saveYear.setOnClickListener(view -> saveModelYear());
+        vehicleSettings.addView(text("BODY COLOUR", 12, MUTED, true));
+        carPaintPicker = new android.widget.Spinner(this);
+        carPaintPicker.setContentDescription("Mazda body colour");
+        carPaintPicker.setPrompt("Mazda MX-5 ND body colour");
+        carPaintPicker.setBackgroundTintList(android.content.res.ColorStateList.valueOf(LIME));
+        carPaintPicker.setAdapter(new android.widget.ArrayAdapter<CarPaint>(this,
+                android.R.layout.simple_spinner_item, CarPaint.values()) {
+            @Override public View getView(int position, View recycled, android.view.ViewGroup parent) {
+                return paintChoice(getItem(position));
+            }
+
+            @Override public View getDropDownView(int position, View recycled, android.view.ViewGroup parent) {
+                return paintChoice(getItem(position));
+            }
+        });
+        carPaintPicker.setSelection(CarPaint.load(this).ordinal());
+        carPaintPicker.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                CarPaint selected = CarPaint.values()[position];
+                if (CarPaint.load(MainActivity.this) != selected) selected.save(MainActivity.this);
+            }
+
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
+        });
+        vehicleSettings.addView(carPaintPicker, new LinearLayout.LayoutParams(-1, -2));
         LinearLayout energy = panel(content);
         energy.addView(text("ENERGY", 12, MUTED, true));
         CheckBox screenAwake = new CheckBox(this);
@@ -598,6 +619,25 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         batteryExemption.setOnClickListener(view -> requestBatteryExemption());
         refreshEnergyStatus();
         return page;
+    }
+
+    private View paintChoice(CarPaint choice) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackgroundColor(PANEL);
+        row.setPadding(dp(10), dp(12), dp(10), dp(12));
+        row.setMinimumHeight(dp(52));
+        View swatch = new View(this);
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(choice.color);
+        background.setCornerRadius(dp(3));
+        background.setStroke(dp(1), MUTED);
+        swatch.setBackground(background);
+        LinearLayout.LayoutParams swatchParams = new LinearLayout.LayoutParams(dp(24), dp(24));
+        swatchParams.rightMargin = dp(12);
+        row.addView(swatch, swatchParams);
+        row.addView(text(choice.label, 14, Color.WHITE, false), new LinearLayout.LayoutParams(0, -2, 1));
+        return row;
     }
 
     private void applyScreenAwake() {
@@ -707,6 +747,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
             diagnosticSignals.clear();
             diagnosticSignals.addAll(filtered);
             debugPanel = new DebugPanel(this, diagnosticSignals, debugTransport);
+            configureDashboardPolling();
                 getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit().putInt(KEY_MODEL_YEAR, modelYear)
                     .putBoolean(KEY_MANUAL_TRANSMISSION, manualTransmission).apply();
             modelYearInput.setError(null);
@@ -736,6 +777,8 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     }
 
     private void showPage(int page) {
+        if (page != PAGE_DEBUG && debugPanel.busy()) debugPanel.stop("Leaving Debug");
+        updateDashboardAcquisition();
         View selected;
         if (page == PAGE_LOGS) selected = logsPage;
         else if (page == PAGE_CONFIGURATION) selected = configurationPage;
@@ -840,9 +883,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
             adapterText.setText("PC simulator via ADB · no CANable connected");
             connectButton.setText(R.string.connect_canable);
             connectButton.setEnabled(false);
-            readButton.setEnabled(simulatorClientConnected);
-            readButton.setText(active ? "STOP ACTIVE READS" : "START ACTIVE READS");
-            setConnection(simulatorClientConnected ? "PC SIMULATOR CONNECTED" : "SIMULATOR READY",
+            setConnection(simulatorClientConnected ? (active ? "SIMULATOR ACTIVE" : "PC SIMULATOR CONNECTED") : "SIMULATOR READY",
                     simulatorClientConnected);
             return;
         }
@@ -883,6 +924,8 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
             addLog("USB permission is required before connecting");
             return;
         }
+        dashboardPoller.reset();
+        DashboardTelemetry.clear("Connecting CANable");
         session = new GsUsb(usbManager, device, this);
         worker = new Thread(session, "gs-usb-can");
         worker.start();
@@ -891,14 +934,12 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
     @SuppressLint("SetTextI18n")
     private void stopSession() {
         debugPanel.stop("CAN session stopped");
-        uiHandler.removeCallbacks(simulatorPoll);
+        dashboardPoller.reset();
+        DashboardTelemetry.clear("CAN session stopped");
         if (session != null) session.stop();
         session = null;
         active = false;
-        pendingSimulatorSequence = -1;
         connected = false;
-        readButton.setEnabled(simulatorClientConnected);
-        readButton.setText("START ACTIVE READS");
         if (device != null) {
             connectButton.setText("OPEN USB SESSION");
             connectButton.setEnabled(true);
@@ -910,27 +951,30 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         }
     }
 
-    private void toggleReads() {
-        if (debugPanel.busy()) return;
-        if (!connected && simulatorClientConnected) {
-            if (active) {
-                stopSimulatorReads("Simulator active reads stopped by user");
-            } else {
-                active = true;
-                readButton.setText("STOP ACTIVE READS");
-                setConnection("SIMULATOR ACTIVE", true);
-                addLog("Simulator active OBD reads enabled; no physical CAN output");
-                uiHandler.removeCallbacks(simulatorPoll);
-                uiHandler.post(simulatorPoll);
+    private void configureDashboardPolling() {
+        DashboardTelemetry.configureSignals(diagnosticSignals);
+        dashboardPoller = new DashboardPoller(diagnosticSignals, new DashboardPoller.Transport() {
+            @Override public int send(DiagnosticSignal signal) throws Exception {
+                return debugTransport.send(signal);
             }
-            return;
+
+            @Override public void log(String message) { addLog(message); }
+        });
+    }
+
+    private void updateDashboardAcquisition() {
+        boolean enabled = !destroyed && dashboardReadsEnabled && (connected || simulatorClientConnected)
+            && !debugPanel.busy();
+        if (enabled == active) return;
+        active = enabled;
+        if (session != null) session.requestDiagnosticMode(enabled);
+        if (enabled) {
+            setConnection(connected ? "CAN ACTIVE" : "SIMULATOR ACTIVE", true);
+            addLog("Automatic dashboard reads enabled");
+        } else {
+            if (connected) setConnection("CAN / DEBUG", true);
+            else if (simulatorClientConnected) setConnection("SIMULATOR / DEBUG", true);
         }
-        if (session == null || !connected) return;
-        active = !active;
-        session.requestActive(active);
-        readButton.setText(active ? "STOP ACTIVE READS" : "START ACTIVE READS");
-        setConnection(active ? "CAN ACTIVE" : "PASSIVE LISTENING", true);
-        addLog(active ? "Active reads enabled by user" : "Active reads stopped by user");
     }
 
     private void setConnection(String value, boolean ready) {
@@ -944,29 +988,18 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         simulatorClientConnected = linkConnected;
         addLog(linkConnected ? "PC simulator connected; simulated frames only" : "PC simulator disconnected");
         if (!connected) {
+            dashboardPoller.reset();
+            DashboardTelemetry.clear(linkConnected ? "Simulator connected" : "Simulator disconnected");
             if (linkConnected) {
                 adapterText.setText("ADB simulator link · physical CAN is not used");
-                readButton.setEnabled(true);
-                readButton.setText(active ? "STOP ACTIVE READS" : "START ACTIVE READS");
+                updateDashboardAcquisition();
                 setConnection(active ? "SIMULATOR ACTIVE" : "PC SIMULATOR CONNECTED", true);
             } else {
                 debugPanel.stop("Simulator disconnected");
-                if (active) stopSimulatorReads("Simulator link closed; active reads stopped");
-                readButton.setEnabled(false);
+                active = false;
                 showAdapter();
             }
         }
-    }
-
-    private void stopSimulatorReads(String reason) {
-        active = false;
-        pendingSimulatorSequence = -1;
-        uiHandler.removeCallbacks(simulatorPoll);
-        readButton.setText("START ACTIVE READS");
-        readButton.setEnabled(simulatorClientConnected);
-        setConnection(simulatorClientConnected ? "PC SIMULATOR CONNECTED" : "SIMULATOR READY",
-                simulatorClientConnected);
-        addLog(reason);
     }
 
     private void addLog(String message) {
@@ -988,12 +1021,16 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
 
     @Override public void onState(String state, boolean isConnected, boolean isActive) {
         runOnUiThread(() -> {
+            boolean wasConnected = connected;
             connected = isConnected;
-            active = isActive;
-            if (!isConnected) debugPanel.stop("CAN disconnected");
+            if (!isConnected) {
+                debugPanel.stop("CAN disconnected");
+                active = false;
+                dashboardPoller.reset();
+                if (wasConnected) DashboardTelemetry.clear("CAN disconnected");
+            }
             setConnection(state.toUpperCase(Locale.US), connected);
-            readButton.setEnabled(connected);
-            readButton.setText(active ? "STOP ACTIVE READS" : "START ACTIVE READS");
+            updateDashboardAcquisition();
             connectButton.setText(connected ? "DISCONNECT CANABLE" : device == null ? "CONNECT CANABLE" : "OPEN USB SESSION");
             connectButton.setEnabled(device != null);
         });
@@ -1005,6 +1042,8 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
 
     @Override public void onReply(DiagnosticReply reply) {
         runOnUiThread(() -> {
+            DashboardTelemetry.acceptReply(reply, SystemClock.elapsedRealtime(), false);
+            dashboardPoller.accept(reply, SystemClock.elapsedRealtime());
             debugPanel.acceptReply(reply, false);
             addLog(String.format(Locale.US, "RX ISO-TP 0x%03X  %s", reply.canId, hex(reply.payload)));
         });
@@ -1022,6 +1061,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
 
     private void displayFrame(CanFrame frame, boolean simulated) {
         DashboardTelemetry.accept(frame, SystemClock.elapsedRealtime(), simulated);
+        dashboardPoller.accept(DiagnosticReply.fromFrame(frame), SystemClock.elapsedRealtime());
         debugPanel.accept(frame, simulated);
         receivedFrames++;
         receiveText.setText(String.format(Locale.US, simulated ? "SIM frames   %d" : "RX frames    %d", receivedFrames));
@@ -1081,7 +1121,7 @@ public final class MainActivity extends Activity implements GsUsb.Listener {
         debugPanel.close();
         destinationPanel.close();
         uiHandler.removeCallbacks(expireValues);
-        uiHandler.removeCallbacks(simulatorPoll);
+        uiHandler.removeCallbacks(dashboardPoll);
         if (session != null) session.stop();
         if (simulationBridge != null) simulationBridge.close();
         unregisterReceiver(usbReceiver);

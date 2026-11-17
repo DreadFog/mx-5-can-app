@@ -81,6 +81,23 @@ class CanSimulatorTest(unittest.TestCase):
         self.assertEqual(response[0], 0x7E8)
         self.assertEqual(response[1][:5], bytes((4, 0x62, 0xA2, 0x11, 0x02)))
 
+    def test_dashboard_pages_receive_current_diagnostic_values(self):
+        signals = self.signals + load_catalog(DISCOVERED_JSON)
+        values = {"MX5_EOT": 85, "MX5_FLV": 23, "GEAR_ACT_SUP": 1,
+                  "GEAR_RAT_SUP": 0, "GEAR_ACT": 4, "GEAR_RAT": 1,
+                  "ECT": 88, "VPWR": 13.8}
+        requests = [
+            (0x7E0, "03221310", 0x7E8, "0562131030D40000"),
+            (0x720, "032261B1", 0x728, "046261B117000000"),
+            (0x7E0, "0201A4", 0x7E8, "0641A4014003E800"),
+            (0x7E0, "020105", 0x7E8, "0341058000000000"),
+            (0x7E0, "020142", 0x7E8, "04414235E8000000"),
+        ]
+        for request_id, request, response_id, expected in requests:
+            with self.subTest(request=request):
+                self.assertEqual(respond_to_request(request_id, bytes.fromhex(request), signals, values, {}),
+                                 (response_id, bytes.fromhex(expected)))
+
     def test_uds_numeric_field_uses_big_endian_bytes(self):
         _, response = build_uds_frame("MX5_MAP", 1.234, self.signals, dict(self.values))
         self.assertEqual(response[:6], bytes((5, 0x62, 0x03, 0x01, 0x04, 0xD2)))

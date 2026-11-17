@@ -49,8 +49,8 @@ public final class NavigationTileRenderer {
             }
         } else if (turn == NavigationRoute.Turn.ROUNDABOUT) {
             canvas.drawLine(0, 0.9f, 0, 0.55f, paint);
-            canvas.drawArc(new RectF(-0.55f, -0.55f, 0.55f, 0.55f), 80, 285, false, paint);
-            arrowHead(canvas, 0.55f, 0.05f, 0, 1);
+            canvas.drawArc(new RectF(-0.55f, -0.55f, 0.55f, 0.55f), 100, -285, false, paint);
+            arrowHead(canvas, -0.55f, 0.05f, 0, 1);
         } else if (turn == NavigationRoute.Turn.U_TURN) {
             Path path = new Path();
             path.moveTo(-0.45f, 0.9f);

@@ -1,0 +1,8 @@
+The engine, gas-station and menu vector drawables are adapted from Material Design Icons by Pictogrammers, licensed under Apache License 2.0.
+Sources:
+https://github.com/Templarian/MaterialDesign/blob/master/svg/engine-outline.svg
+https://github.com/Templarian/MaterialDesign/blob/master/svg/gas-station-outline.svg
+https://github.com/Templarian/MaterialDesign/blob/master/svg/menu.svg
+License: material_design_icons_license.txt in these assets.
+
+mx5_roadster_top.xml is an original schematic roadster drawing, not downloaded artwork or an official Mazda illustration.

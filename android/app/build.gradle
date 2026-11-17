@@ -39,5 +39,6 @@ dependencies {
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.json:json:20240303'
     testImplementation 'org.robolectric:robolectric:4.14.1'
+    testImplementation 'androidx.car.app:app-testing:1.4.0'
     implementation 'androidx.car.app:app:1.4.0'
 }

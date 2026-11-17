@@ -45,6 +45,7 @@ public final class GsUsb implements Runnable {
     public void requestActive(boolean enabled) { requestedActive = enabled; }
     public void requestDiagnosticMode(boolean enabled) { requestedDiagnosticMode = enabled; }
     public void stop() { requestedActive = false; running = false; }
+    public boolean readPending() { return singleRead.get() != null; }
 
     public boolean readOnce(DiagnosticSignal signal) {
         return running && !requestedActive && singleRead.compareAndSet(null, signal);

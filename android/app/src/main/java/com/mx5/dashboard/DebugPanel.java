@@ -13,6 +13,7 @@ import android.widget.CheckBox;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -23,6 +24,8 @@ public final class DebugPanel extends ScrollView {
     public interface Transport {
         boolean ready();
         boolean physical();
+        boolean dashboardReadsEnabled();
+        void setDashboardReadsEnabled(boolean enabled);
         int send(DiagnosticSignal signal) throws Exception;
         void holdNormalMode(boolean enabled);
         void log(String message);
@@ -101,6 +104,19 @@ public final class DebugPanel extends ScrollView {
         TextView title = text("DEBUG / RAW VALUES", 20, Color.WHITE);
         title.setPadding(0, 0, 0, dp(12));
         rows.addView(title);
+        Switch dashboardReads = new Switch(context);
+        dashboardReads.setText("Automatic dashboard reads");
+        dashboardReads.setTextColor(Color.WHITE);
+        dashboardReads.setTextSize(14);
+        dashboardReads.setMinHeight(dp(48));
+        dashboardReads.setContentDescription("Automatic dashboard reads");
+        dashboardReads.setTooltipText("Pause dashboard reads to enable Debug controls");
+        dashboardReads.setChecked(transport.dashboardReadsEnabled());
+        rows.addView(dashboardReads, new LinearLayout.LayoutParams(-1, dp(56)));
+        dashboardReads.setOnCheckedChangeListener((button, checked) -> {
+            transport.setDashboardReadsEnabled(checked);
+            refresh();
+        });
         ImageButton stopLive = new ImageButton(context);
         stopLive.setImageResource(android.R.drawable.ic_media_pause);
         stopLive.setColorFilter(0xFFCAE297);

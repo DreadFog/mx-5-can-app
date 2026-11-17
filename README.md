@@ -4,20 +4,21 @@ Native Android dashboard for a 2024 Mazda MX-5 ND. The Pixel 9 connects directly
 
 ## Features
 
-- Displays vehicle speed and engine RPM; gear remains unavailable until a numerical signal is verified.
-- Starts in CAN listen-only mode. Active mode alternates standard OBD-II RPM (`01 0C`) and speed (`01 0D`) requests at up to 10 requests per second total.
+- Displays vehicle speed, engine RPM and ECU-reported actual gear when supported; gear is never inferred from speed/RPM.
+- Starts read-only OBD/UDS polling automatically when an authorized CANable session or simulator connects. Requests are serialized and capped at 10 per second total; the visible Android Auto page selects its own measurement group.
 - Provides separate Dashboard, Logs, Configuration, and Debug pages.
 - Debug shows the latest decoded and raw OBD/UDS responses with CAN/SIM source and freshness. Each value has a read-once button and a Live checkbox targeting 10 Hz per selected value.
 - Configuration stores the model year (default 2024) and transmission (default Manual). Debug applies both filters; 2024 exposes 34 signals in Manual or 38 in Automatic, including standard RPM/speed.
+- Configuration also offers **Body Colour**, with seven official 2024 MX-5 ND paint names and a swatch for each. Soul Red Crystal Metallic is the default. The selection is saved immediately and updates the Auto car illustration without restarting; screen colours are approximations, not factory paint specifications.
 - Debug can discover the standard OBD PIDs advertised by the engine ECU using a bounded sequence of support-mask queries.
 - The configurable RPM shift threshold defaults to 6,000 RPM. Edge lighting fades in from yellow at 75% of the threshold, transitions through orange at 90%, and reaches bright red at or above the threshold. The dashboard remains visible.
-- The CANable disconnects and returns to listen-only when active reads are stopped or the session closes.
+- Disconnecting stops automatic reads. The **Automatic dashboard reads** switch at the top of Debug pauses/resumes them, including while Android Auto is visible. The pause remains in effect across phone pages until explicitly re-enabled or the activity restarts.
 
 ## Safety and Hardware
 
 Use a data-capable USB-C OTG adapter with the Pixel 9. The CANable draws power from the phone; use a powered OTG hub if Android reports excess USB power. Disconnect the adapter from any computer before connecting it to the phone.
 
-Test while parked, in a well-ventilated area, and do not operate the interface while driving. Active mode sends only standard OBD read requests; measurements are not a substitute for the vehicle's instruments. Values expire after three seconds without a response.
+Test while parked, in a well-ventilated area, and do not operate the interface while driving. Connecting a source starts OBD/UDS read requests automatically; there is no Start active reads button. No ECU write or actuator services are sent. Measurements are not a substitute for the vehicle's instruments. RPM, speed and gear expire after three seconds; slower dashboard measurements after ten seconds.
 
 ## Build and Install
 
@@ -33,7 +34,7 @@ The debug APK is intended for local installation, not release distribution. See 
 
 ## Debug Reads
 
-Open Debug after connecting a CANable session or the PC simulator. Stop Dashboard active reads first. Use the refresh icon to request a value once, or check Live to monitor it at a target of 10 Hz. The pause icon stops all Debug Live reads. Debug polling continues across pages, but selections are not saved across app restarts or reconnections.
+Open Debug after connecting a CANable session or the PC simulator and turn off **Automatic dashboard reads**. Debug controls become available once any outstanding Dashboard request finishes or times out, even with Android Auto visible. Use the refresh icon to request a value once, or check Live to monitor it at a target of 10 Hz. The pause icon stops all Debug Live reads. Leaving Debug stops its reads but does not re-enable Dashboard polling. Turn **Automatic dashboard reads** back on to stop Debug Live/discovery and resume dashboard telemetry. The switch defaults to on when the phone activity starts; Live selections are not saved across app restarts or reconnections.
 
 The panel includes standard RPM/speed and the UDS catalogue signals matching the configured model year and transmission. Set Manual or Automatic in Configuration and save the vehicle configuration to rebuild Debug; current Debug reads stop and its displayed values are reset. The default is 2024 Manual (34 signals). Manual hides only the known automatic-transmission queries, not every transmission or clutch signal. Values remain visible when stale; negative UDS responses, invalid values, and timeouts are shown instead of inventing measurements. Profile compatibility does not guarantee ECU support. Physical requests require confirmation while parked; no actuator/write services are sent.
 
@@ -43,13 +44,13 @@ The search icon at the top of Debug starts engine discovery after active/Live re
 
 This is discovery of advertised standard PID support, not a Mazda DID scan or automatic reading of all discovered parameters. Results are displayed for the current Debug session and reset on app restart or vehicle-profile change. The PC simulator advertises only its standard RPM/speed PIDs. A stationary test on the 2024 manual vehicle returned 52 PIDs from six support blocks, including `42`, `49`, `4A`, `A4` and `A6`; their actual values still require suitable decoders and verification.
 
-Debug requests are serialized, with one response awaited at a time. The target is 10 Hz per selected value, not a guarantee: slow ECUs or many selections reduce the achieved rate without queuing a backlog. A timeout or negative response stops that signal's Live polling; disconnects stop all Debug reads. Physical CAN returns to listen-only once the final pending request finishes and no Live selection remains. Debug Live and Dashboard polling are mutually exclusive; the Dashboard's existing 10 requests/s total cadence is unchanged.
+Debug requests are serialized, with one response awaited at a time. The target is 10 Hz per selected value, not a guarantee: slow ECUs or many selections reduce the achieved rate without queuing a backlog. A timeout or negative response stops that signal's Live polling; disconnects stop all Debug reads. Physical CAN returns to listen-only once Dashboard polling is paused, the final pending request finishes and no Live selection remains. Debug Live and Dashboard polling are mutually exclusive; Dashboard uses a 10 requests/s aggregate cap.
 
 ## Experimental Android Auto
 
-The debug APK adds a read-only **MX-5 Experimental** Car App Library screen for RPM, speed and connection status. The phone remains responsible for acquiring CAN/simulator data; the Auto screen cannot start CAN transmission and does not mirror the custom phone UI. The integration is absent from release builds. Host acceptance and real-vehicle operation remain experimental, not guaranteed.
+Debug and release APKs include **MX-5 Experimental**. The main Auto page shows navigation/RPM tiles with oil temperature, fuel volume and actual gear above them. A hamburger action opens a wheel-pressure/temperature view plus coolant, voltage, intake temperature and oil pressure. Changing pages switches the read-only polling group rather than polling both pages. The 2024 profile has no verified compatible wheel signals, so those fields remain unavailable. The phone activity still owns CAN/simulator acquisition; background process destruction stops it. Host acceptance remains experimental. See the [tested personal-use installer workaround](android/README.md#personal-use-install-source-workaround).
 
-See [Android Auto Debug and DHU Setup](android/README.md#experimental-android-auto-debug-only) for the Arch dependencies, Android Auto developer settings, simulator testing and limitations.
+See [Android Auto and DHU Setup](android/README.md#experimental-android-auto) for the Arch dependencies, Android Auto developer settings, simulator testing and limitations.
 
 ## PC CAN Simulator
 
@@ -59,7 +60,7 @@ Connect the Pixel to the computer over USB with ADB authorized, open the app, th
 python3 tools/can_simulator.py
 ```
 
-Choose the USB or wireless ADB transport and connect. The PC panel provides RPM/speed sliders and controls for all 91 UDS signals in `default.json`; frames are forwarded to the app through a local ADB socket. Slider updates are sent asynchronously so they do not block the panel while active reads are running. The app's **Start active reads** button also works in this mode: the PC simulator answers its OBD requests using the current RPM/speed slider values. This mode is entirely simulated and never writes to the CANable or vehicle bus. The panel shows recent events and errors; a persistent diagnostic log is written to `~/.local/state/mx5-can-simulator.log`. Wireless debugging can remain enabled while USB is used for the simulator.
+Choose the USB or wireless ADB transport and connect. The PC panel provides RPM/speed sliders and Mazda/discovered-OBD controls; frames are forwarded to the app through a local ADB socket. Dashboard requests start automatically on connection and use the current simulator values. Set the actual-gear support flag as well as its value for the gear tile. Slider updates are asynchronous. This mode is entirely simulated and never writes to the CANable or vehicle bus. The panel shows recent events and errors; a persistent diagnostic log is written to `~/.local/state/mx5-can-simulator.log`. Wireless debugging can remain enabled while USB is used for the simulator.
 
 Run the simulator codec tests with:
 
